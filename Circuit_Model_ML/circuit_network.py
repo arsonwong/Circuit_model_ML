@@ -34,6 +34,18 @@ import torch_scatter
 import pickle
 
 tandem_model = pickle.load(open(r"C:\Users\arson\Documents\Tandem_Cell_Fit_Tools\best_fit_tandem_model.pkl", 'rb'))
+tandem_model.set_operating_point(V = 3)
+# print(tandem_model.operating_point)
+V1 = tandem_model.operating_point[0]
+# tandem_model.plot(fourth_quadrant=False)
+# tandem_model.show()
+# for element in tandem_model.subgroups:
+#     print(element.operating_point)
+#     element.plot(fourth_quadrant=False)
+#     element.show()
+
+V3 = V1-tandem_model.subgroups[2].operating_point[0]
+V2 = V3-tandem_model.subgroups[1].operating_point[0]
 
 # need COO (index1,index2,element)
 class COO():
@@ -43,19 +55,22 @@ class COO():
         self.COO_list.append([index1,index2,element])
     @staticmethod
     def generate_edge_feature(element:CircuitElement):
+        area = 1.0
+        if element.parent is not None and isinstance(element.parent,Cell):
+            area = element.parent.area
         # IL, cond, I0, n, breakdownV, diode polarity
         edge_feature = torch.zeros(1,6)
         edge_feature[0,3] = 1.0
         edge_feature[0,5] = 1.0
         if isinstance(element,CurrentSource):
-            edge_feature[0,0] = element.IL
+            edge_feature[0,0] = element.IL*area
         elif isinstance(element,Resistor):
-            edge_feature[0,1] = element.cond
+            edge_feature[0,1] = element.cond*area
         elif isinstance(element,Diode):
-            edge_feature[0,2] = element.I0
+            edge_feature[0,2] = element.I0*area
             edge_feature[0,3] = element.n
             edge_feature[0,4] = element.V_shift
-            if isinstance(element,ForwardDiode):
+            if isinstance(element,ReverseDiode):
                 edge_feature[0,5] = -1.0
 
         return edge_feature
@@ -92,7 +107,7 @@ def assign_nodes(circuit_group,node_count=0):
     return node_count
 
 assign_nodes(tandem_model)
-tandem_model.draw()
+tandem_model.draw(display_value=True)
 
 def translate_to_COO(circuit_group):
     coo = COO()
@@ -102,7 +117,6 @@ def translate_to_COO(circuit_group):
         coo.insert(element.neg_node,element.pos_node,element)
     return coo.generate_COO_tensor()
         
-# edge feature is a tensor of numbers like R, I0, n etc
 class CircuitNetwork(pyg.nn.MessagePassing):
     def forward(self, x, edge_index, edge_feature):
         return self.propagate(edge_index, x=(x, x), edge_feature=edge_feature)
@@ -117,21 +131,27 @@ class CircuitNetwork(pyg.nn.MessagePassing):
         I0 = edge_feature[:,3].unsqueeze(1)
         n = edge_feature[:,4].unsqueeze(1)
         breakdownV = edge_feature[:,5].unsqueeze(1)
-        breakdownV *= polarity
         diode_polarity = edge_feature[:,6].unsqueeze(1)
-        I = polarity * (IL + cond*V + diode_polarity * I0*(torch.exp(((V-breakdownV)*diode_polarity)/(n*0.02568)))-1.0)
+        # I = -polarity * cond*V
+        # I = polarity * IL
+        # I = -polarity * (diode_polarity * I0*(torch.exp((V*diode_polarity-breakdownV)/(n*0.02568))-0.5*(1+diode_polarity)))
+        
+        I = polarity * (IL - cond*V - diode_polarity * I0*(torch.exp((V*diode_polarity-breakdownV)/(n*0.02568))-0.5*(1+diode_polarity)))
+        
+        # I = polarity * (IL - cond*V)
+        #I = polarity * (IL + cond*V + diode_polarity * I0*(torch.exp((V*diode_polarity-breakdownV)/(n*0.02568))-1.0))
         return I
     
     def aggregate(self, inputs, index, dim_size=None):
         return torch_scatter.scatter(inputs, index, dim=self.node_dim, dim_size=dim_size, reduce="sum")
-        
-    
     
 coo = translate_to_COO(tandem_model)
 edge_index = coo[:,:2].long().t()
 edge_feature = coo[:,2:]
 max_node_index = edge_index.max().item()
-x = torch.zeros(max_node_index+1,1)
+# x = torch.zeros(max_node_index+1,1)
+# x = torch.tensor([0.0,-10.7,-10.7,-10.7])[:,None]
+x = torch.tensor([0.0,V1,V2,V3])[:,None]
 cn = CircuitNetwork()
 result = cn.forward(x, edge_index, edge_feature)
 
