@@ -166,3 +166,4 @@ example_calc_solar_simulator_error/
 *.pkl
 *.json
 *.jpg
+*.pt
