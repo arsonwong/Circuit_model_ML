@@ -31,7 +31,7 @@ class COO():
     def insert(self,index1,index2,element:CircuitElement):
         self.COO_list.append([index1,index2,element])
     @staticmethod
-    def generate_edge_feature(element:CircuitElement, neg_node, pos_node):
+    def generate_edge_feature(element:CircuitElement, neg_node, pos_node, polarity):
         area = 1.0
         if element.parent is not None and isinstance(element.parent,Cell):
             area = element.parent.area
@@ -39,38 +39,39 @@ class COO():
         edge_feature = torch.zeros(1,5)
         edge_feature[0,3] = 1.0
         # diode neg node, diode pos node, corresponding neg node, corresponding pos node
-        polarity_nodes = torch.tensor([-1,-1,-1,-1], dtype=torch.long)
+        diode_nodes = torch.tensor([-1,-1], dtype=torch.long)
         if isinstance(element,PC_CurrentSource):
             ref_PC_diode = element.ref_PC_diode
-            edge_feature[0,2] = np.log(ref_PC_diode.I0*area)
+            edge_feature[0,2] = -polarity*np.log(ref_PC_diode.I0*area)
             edge_feature[0,3] = ref_PC_diode.n
             edge_feature[0,4] = ref_PC_diode.V_shift
-            polarity_nodes = torch.tensor([ref_PC_diode.neg_node,ref_PC_diode.pos_node,pos_node,neg_node], dtype=torch.long)
+            diode_nodes = torch.tensor([ref_PC_diode.neg_node,ref_PC_diode.pos_node], dtype=torch.long)
         elif isinstance(element,CurrentSource):
-            edge_feature[0,0] = element.IL*area
-            polarity_nodes = torch.tensor([-1,-1,neg_node,pos_node], dtype=torch.long)
+            edge_feature[0,0] = polarity*element.IL*area
         elif isinstance(element,Resistor):
             edge_feature[0,1] = element.cond*area
         elif isinstance(element,Diode):
-            edge_feature[0,2] = np.log(element.I0*area)
+            edge_feature[0,2] = polarity*np.log(element.I0*area)
             edge_feature[0,3] = element.n
             edge_feature[0,4] = element.V_shift
-            polarity_nodes = torch.tensor([neg_node, pos_node, neg_node, pos_node], dtype=torch.long)
+            diode_nodes = torch.tensor([neg_node, pos_node], dtype=torch.long)
             if isinstance(element,ReverseDiode):
-                polarity_nodes = torch.tensor([pos_node, neg_node, pos_node, neg_node], dtype=torch.long)
-        return edge_feature, polarity_nodes
+                diode_nodes = torch.tensor([pos_node, neg_node], dtype=torch.long)
+                edge_feature[0,2] *= -1
+        return edge_feature, diode_nodes
     def generate_COO_tensor(self):
         COO_tensor = torch.zeros(2*len(self.COO_list),7)
-        polarity_nodes_tensor = torch.zeros(2*len(self.COO_list),4,dtype=torch.long)
+        diode_nodes_tensor = torch.zeros(2*len(self.COO_list),2,dtype=torch.long)
         for i, _ in enumerate(self.COO_list):
             COO_tensor[i,0:2] = torch.tensor(self.COO_list[i][0:2], dtype=COO_tensor.dtype)
-            edge_feature, polarity_nodes = self.generate_edge_feature(self.COO_list[i][-1], COO_tensor[i,0].item(), COO_tensor[i,1].item())
-            polarity_nodes_tensor[i,:] = polarity_nodes
+            edge_feature, diode_nodes = self.generate_edge_feature(self.COO_list[i][-1], COO_tensor[i,0].item(), COO_tensor[i,1].item(), polarity=1)
             COO_tensor[i,2:] = edge_feature
+            diode_nodes_tensor[i,:] = diode_nodes
             COO_tensor[i+len(self.COO_list),0:2] = torch.tensor(self.COO_list[i][0:2][::-1], dtype=COO_tensor.dtype)
+            edge_feature, diode_nodes = self.generate_edge_feature(self.COO_list[i][-1], COO_tensor[i,0].item(), COO_tensor[i,1].item(), polarity=-1)
             COO_tensor[i+len(self.COO_list),2:] = edge_feature
-            polarity_nodes_tensor[i+len(self.COO_list),:] = polarity_nodes
-        return COO_tensor, polarity_nodes_tensor
+            diode_nodes_tensor[i+len(self.COO_list),:] = diode_nodes
+        return COO_tensor, diode_nodes_tensor
     
 def assign_nodes(circuit_group,node_count=0):
     if node_count==0:
@@ -99,34 +100,32 @@ def translate_to_COO(circuit_group):
     circuit_elements = circuit_group.findElementType(CircuitElement)            
     for element in circuit_elements:
         coo.insert(element.neg_node,element.pos_node,element)
-    COO_tensor, polarity_nodes_tensor = coo.generate_COO_tensor()
-    return COO_tensor, polarity_nodes_tensor
+    COO_tensor, diode_nodes_tensor = coo.generate_COO_tensor()
+    return COO_tensor, diode_nodes_tensor
         
 class CircuitNetwork(pyg.nn.MessagePassing):
     def forward(self, data, x=None):
         if x is None:
             x = data.x
-        return self.propagate(data.edge_index, x=(x,x), edge_feature=data.edge_attr, y=data.y, polarity_nodes=data.polarity_nodes_tensor, ref_x=x)
+        return self.propagate(data.edge_index, x=(x,x), edge_feature=data.edge_attr, y=data.y, diode_nodes=data.diode_nodes_tensor, ref_x=x)
 
-    def message(self, x_i, x_j, edge_feature, polarity_nodes, ref_x):
+    def message(self, x_i, x_j, edge_feature, diode_nodes, ref_x):
         # resistor - current is positive from j --> i
         cond = edge_feature[:,1].unsqueeze(1)
         I = cond*(x_j - x_i)
 
         # current source
-        polarity = torch.ones_like(x_j)
-        find_ = torch.where((polarity_nodes[:,2]>=0) & (polarity_nodes[:,2]==x_i))[0]
-        polarity[find_] = -1.0
         IL = edge_feature[:,0].unsqueeze(1)
-        I += polarity*IL
+        I += IL
 
         # diode
-        find_ = torch.where(polarity_nodes[:,0]>=0)[0]
-        diode_V_drop = (ref_x[polarity_nodes[find_,1],0] - ref_x[polarity_nodes[find_,0],0]).unsqueeze(1)
+        find_ = torch.where(diode_nodes[:,0]>=0)[0]
+        diode_V_drop = (ref_x[diode_nodes[find_,1],0] - ref_x[diode_nodes[find_,0],0]).unsqueeze(1)
         log_I0 = edge_feature[find_,2].unsqueeze(1)
+        I0 = -torch.sign(log_I0)*torch.exp(-torch.abs(log_I0))
         n = edge_feature[find_,3].unsqueeze(1)
         breakdownV = edge_feature[find_,4].unsqueeze(1)
-        I[find_] -= polarity[find_]*torch.exp(log_I0)*(torch.exp((diode_V_drop-breakdownV)/(n*0.02568))-1.0)
+        I[find_] -= I0*(torch.exp((diode_V_drop-breakdownV)/(n*0.02568))-1.0)
 
         return I
     
@@ -184,7 +183,11 @@ class InteractionNetwork(pyg.nn.MessagePassing):
     def message(self, x_i, x_j, edge_feature, polarity_nodes, ref_x):
         x_i_ = x_i
         x_j_ = x_j
-        
+
+        polarity = torch.ones_like(x_j)
+        find_ = torch.where((polarity_nodes[:,2]>=0) & (polarity_nodes[:,2]==x_i))[0]
+        polarity[find_] = -1.0
+
         x = torch.cat((x_i, x_j, edge_feature), dim=-1)
         x = self.lin_edge(x)
         return x
@@ -237,24 +240,24 @@ class LearnedSimulator(torch.nn.Module):
 
 if __name__ == "__main__":
     tandem_model = pickle.load(open(r"C:\Users\arson\Documents\Tandem_Cell_Fit_Tools\best_fit_tandem_model.pkl", 'rb'))
-    insert_PC_currentsource(tandem_model)
-
-    tandem_model_clone = circuit_deepcopy(tandem_model)
+    tandem_model.cells[0].set_IL(0.0)
 
     target_I = 0
     tandem_model.set_operating_point(I=target_I)
     V1 = tandem_model.operating_point[0]
     V3 = V1-tandem_model.subgroups[2].operating_point[0]
-    V2 = V3-tandem_model.subgroups[1].operating_point[0]
+    V2 = V3-tandem_model.subgroups[1].operating_point[0]    
+    insert_PC_currentsource(tandem_model)
     assign_nodes(tandem_model)
     tandem_model.draw(display_value=True)
         
-    coo, polarity_nodes_tensor = translate_to_COO(tandem_model)
+    coo, diode_nodes_tensor = translate_to_COO(tandem_model)
     edge_index = coo[:,:2].long().t()
     edge_feature = coo[:,2:]
     max_node_index = edge_index.max().item()
 
     x = torch.tensor([0.0,V1,V2,V3])[:,None]
+    print("kaka1")
     print(x)
     # 0th index is the boundary condition:
     # 0-not a boundary; 1-voltage pinning (Dirichlet boundary condition); 2-net current pinning
@@ -268,14 +271,14 @@ if __name__ == "__main__":
         edge_index=edge_index,  
         edge_attr=edge_feature, 
         y=node_boundary_conditions,
-        polarity_nodes_tensor = polarity_nodes_tensor
+        diode_nodes_tensor = diode_nodes_tensor
     )
 
     node_error = cn.forward(data)
     rows = torch.where(node_boundary_conditions[:,0] != 1)[0]
 
     for i in range(5):
-        J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, edge_index=edge_index, edge_attr=edge_feature, polarity_nodes_tensor=polarity_nodes_tensor)), x).squeeze()
+        J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, edge_index=edge_index, edge_attr=edge_feature, diode_nodes_tensor=diode_nodes_tensor)), x).squeeze()
         J = J[rows][:, rows]
 
         node_error = node_error[rows]
@@ -290,10 +293,11 @@ if __name__ == "__main__":
             edge_index=edge_index,  
             edge_attr=edge_feature,
             y=node_boundary_conditions,
-            polarity_nodes_tensor = polarity_nodes_tensor
+            diode_nodes_tensor=diode_nodes_tensor
         )
 
         node_error = cn.forward(data)
     
+    print("kaka")
     print(x)
     print(node_error)
