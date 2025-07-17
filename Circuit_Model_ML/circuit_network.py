@@ -173,22 +173,20 @@ class InteractionNetwork(pyg.nn.MessagePassing):
         self.lin_edge = MLP(hidden_size * 3, hidden_size, hidden_size, layers)
         self.lin_node = MLP(hidden_size * 2, hidden_size, hidden_size, layers)
 
-    def forward(self, x, edge_index, edge_feature, polarity_nodes):
-        edge_out, aggr = self.propagate(edge_index, x=(x, x), edge_feature=edge_feature, polarity_nodes=polarity_nodes, ref_x=x)
+    def forward(self, x, edge_index, edge_feature, diode_nodes):
+        edge_out, aggr = self.propagate(edge_index, x=(x, x), edge_feature=edge_feature, diode_nodes=diode_nodes, ref_x=x)
         node_out = self.lin_node(torch.cat((x, aggr), dim=-1))
         edge_out = edge_feature + edge_out
         node_out = x + node_out
         return node_out, edge_out
 
-    def message(self, x_i, x_j, edge_feature, polarity_nodes, ref_x):
+    def message(self, x_i, x_j, edge_feature, diode_nodes, ref_x):
         x_i_ = x_i
         x_j_ = x_j
-
-        polarity = torch.ones_like(x_j)
-        find_ = torch.where((polarity_nodes[:,2]>=0) & (polarity_nodes[:,2]==x_i))[0]
-        polarity[find_] = -1.0
-
-        x = torch.cat((x_i, x_j, edge_feature), dim=-1)
+        find_ = torch.where(diode_nodes[:,0]>=0)[0]
+        x_i_[find_] = ref_x[diode_nodes[find_,0]]
+        x_j_[find_] = ref_x[diode_nodes[find_,1]]
+        x = torch.cat((x_i_, x_j_, edge_feature), dim=-1)
         x = self.lin_edge(x)
         return x
 
@@ -206,7 +204,7 @@ class LearnedSimulator(torch.nn.Module):
         super().__init__()
         self.embed_type = torch.nn.Embedding(3, embedding_dim)
         self.node_in = MLP(embedding_dim + 2, hidden_size, hidden_size, 3)
-        self.edge_in = MLP(8, hidden_size, hidden_size, 3)
+        self.edge_in = MLP(5, hidden_size, hidden_size, 3)
         self.node_out = MLP(hidden_size, hidden_size, 1, 3, layernorm=False)
         self.n_mp_layers = n_mp_layers
         self.layers = torch.nn.ModuleList([InteractionNetwork(
@@ -222,12 +220,12 @@ class LearnedSimulator(torch.nn.Module):
     def forward(self, data: pyg.data.Data, modifiers = None):
         # pre-processing
         # node feature: combine categorial feature data.x and contiguous feature data.pos.
-        node_feature = torch.cat((self.embed_type(data.x[:,0]), data.x[:,1:]), dim=-1)
+        node_feature = torch.cat((self.embed_type(data.x[:,0].long()), data.x[:,1:]), dim=-1)
         node_feature = self.node_in(node_feature)
         edge_feature = self.edge_in(data.edge_attr)
         # stack of GNN layers
         for i in range(self.n_mp_layers):
-            node_feature, edge_feature = self.layers[i](node_feature, data.edge_index, edge_feature=edge_feature)
+            node_feature, edge_feature = self.layers[i](node_feature, data.edge_index, edge_feature=edge_feature, diode_nodes=data.diode_nodes_tensor)
         # post-processing
         out = self.node_out(node_feature)
 

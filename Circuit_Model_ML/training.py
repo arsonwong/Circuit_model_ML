@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch_geometric.data import DataLoader  # for batching graphs
+from torch.utils.data import DataLoader  # for batching graphs
+from torch_geometric.data import Batch
 from tqdm import tqdm  # for progress bar
 from circuit_network import *
 import os
@@ -33,7 +34,7 @@ def generate_data(tandem_model, data_path, split, num=10000):
         V2 = V3-tandem_model.subgroups[1].operating_point[0]
         x = torch.tensor([0.0,V1,V2,V3])[:,None]
 
-        coo = translate_to_COO(tandem_model)
+        coo, diode_nodes_tensor = translate_to_COO(tandem_model)
         edge_index = coo[:,:2].long().t()
         edge_feature = coo[:,2:]
 
@@ -41,13 +42,14 @@ def generate_data(tandem_model, data_path, split, num=10000):
             x=x,  
             edge_index=edge_index,  
             edge_attr=edge_feature, 
-            y=node_boundary_conditions
+            y=node_boundary_conditions,
+            diode_nodes_tensor=diode_nodes_tensor
         )
         node_error = cn.forward(data)
         rows = torch.where(node_boundary_conditions[:,0] != 1)[0]
         for j in range(7):
             def f(x_):
-                data = pyg.data.Data(x=x_, edge_index=edge_index, edge_attr=edge_feature)
+                data = pyg.data.Data(x=x_, edge_index=edge_index, edge_attr=edge_feature,diode_nodes_tensor=diode_nodes_tensor)
                 return cn(data)
 
             J = torch.autograd.functional.jacobian(f, x).squeeze()
@@ -64,12 +66,13 @@ def generate_data(tandem_model, data_path, split, num=10000):
                 x=x, 
                 edge_index=edge_index,  
                 edge_attr=edge_feature,
-                y=node_boundary_conditions
+                y=node_boundary_conditions,
+                diode_nodes_tensor=diode_nodes_tensor
             )
 
             node_error = cn.forward(data)
         assert(torch.sum(node_error**2).item() < 1e-12*4)
-        data_.append((node_boundary_conditions,edge_index,edge_feature,x))
+        data_.append((node_boundary_conditions,edge_index,edge_feature,x,diode_nodes_tensor))
         if i > 0 and i % 10000 == 0:
             # pickle dump the data
             out_path = os.path.join(data_path, f"{split}.pkl")
@@ -79,6 +82,32 @@ def generate_data(tandem_model, data_path, split, num=10000):
     out_path = os.path.join(data_path, f"{split}.pkl")
     with open(out_path, "wb") as f:
         pickle.dump(data_, f)
+
+def custom_collate_fn(data_list):
+    # Standard PyG batching (handles x, edge_index, edge_attr, y, etc.)
+    batch = Batch.from_data_list(data_list)
+
+    # Manually batch diode_nodes_tensor by adding node offset per graph
+    diode_nodes = []
+    edge_indices = []
+    node_offset = 0
+
+    for data in data_list:
+        a = data.diode_nodes_tensor.clone()
+        find_ = torch.where(a[:,0]>=0)[0]
+        a[find_,:] += node_offset
+        diode_nodes.append(a)
+
+        a = data.edge_index.clone()
+        a += node_offset
+        edge_indices.append(a)
+
+        node_offset += data.num_nodes
+
+    batch.diode_nodes_tensor = torch.cat(diode_nodes, dim=0)
+    batch.edge_index = torch.cat(edge_indices,dim=1)
+
+    return batch
 
 class Dataset(pyg.data.Dataset):
     def __init__(self, data_path, split, single_example=False):
@@ -96,12 +125,13 @@ class Dataset(pyg.data.Dataset):
         idx_ = 0
         if self.single_example is False:
             idx_ = idx
-        node_boundary_conditions,edge_index,edge_feature,x = self.data[idx_]
+        node_boundary_conditions,edge_index,edge_feature,x,diode_nodes_tensor = self.data[idx_]
         graph = pyg.data.Data(
             x=node_boundary_conditions,  
             edge_index=edge_index,  
             edge_attr=edge_feature,
             y=node_boundary_conditions,
+            diode_nodes_tensor=diode_nodes_tensor,
             answer = x  
         )
         return graph
@@ -112,14 +142,16 @@ def weight_file_name(path,current_epoch,supervised,single_example):
 
 
 if __name__ == "__main__":
-    # tandem_model = pickle.load(open(r"C:\Users\arson\Documents\Tandem_Cell_Fit_Tools\best_fit_tandem_model.pkl", 'rb'))
-    # generate_data(tandem_model, "../data","train",100000)
-    # generate_data(tandem_model, "../data","val",10000)
-    # assert(1==0)
-
+    target_I = 4
+    node_boundary_conditions = torch.tensor([[1,0,0],[2,0,target_I],[0,0,0],[0,0,0]],dtype=torch.float)
     cn = CircuitNetwork()
 
-    for supervised in [False,True]:
+    tandem_model = pickle.load(open(r"C:\Users\arson\Documents\Tandem_Cell_Fit_Tools\best_fit_tandem_model.pkl", 'rb'))
+    generate_data(tandem_model, "../data","train",100000)
+    generate_data(tandem_model, "../data","val",10000)
+    assert(1==0)
+
+    for supervised in [True,False]:
         for single_example in [False,True]:
             # ==== Model, loss, optimizer ====
             # model = LearnedSimulator(hidden_size=128,n_mp_layers=10).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
@@ -132,8 +164,8 @@ if __name__ == "__main__":
 
             train_dataset = Dataset("../data","train",single_example=single_example)
             val_dataset = Dataset("../data","val")
-            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-            val_loader = DataLoader(val_dataset, batch_size=batch_size)
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate_fn)
 
             # ==== Training Loop ====
             for epoch in range(current_epoch,epochs):
@@ -176,7 +208,8 @@ if __name__ == "__main__":
                         data = pyg.data.Data(
                             x=batch.answer,  
                             edge_index=batch.edge_index,  
-                            edge_attr=batch.edge_attr, 
+                            edge_attr=batch.edge_attr,
+                            diode_nodes_tensor=batch.diode_nodes_tensor, 
                             y=batch.y
                         )
                         node_error = cn.forward(data)
@@ -188,7 +221,8 @@ if __name__ == "__main__":
                             x=output,  
                             edge_index=batch.edge_index,  
                             edge_attr=batch.edge_attr, 
-                            y=batch.y
+                            y=batch.y,
+                            diode_nodes_tensor=batch.diode_nodes_tensor
                         )
                         node_error = cn.forward(data)
                         if node_error.dim() == 2 and node_error.shape[1] == 1:
