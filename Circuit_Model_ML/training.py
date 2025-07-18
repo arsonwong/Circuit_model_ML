@@ -147,9 +147,9 @@ if __name__ == "__main__":
     cn = CircuitNetwork()
 
     tandem_model = pickle.load(open(r"C:\Users\arson\Documents\Tandem_Cell_Fit_Tools\best_fit_tandem_model.pkl", 'rb'))
-    generate_data(tandem_model, "../data","train",100000)
-    generate_data(tandem_model, "../data","val",10000)
-    assert(1==0)
+    # generate_data(tandem_model, "../data","train",100000)
+    # generate_data(tandem_model, "../data","val",10000)
+    # assert(1==0)
 
     for supervised in [True,False]:
         for single_example in [False,True]:

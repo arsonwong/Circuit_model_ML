@@ -11,6 +11,10 @@ import torch_scatter
 import pickle
 import math
 import numpy as np
+from matplotlib import pyplot as plt
+from torch_geometric.utils import to_networkx
+import networkx as nx
+from utilities import *
 
 class PC_CurrentSource(CurrentSource):
     def specify_ref_PC_diode(self,PC_diode):
@@ -72,6 +76,142 @@ class COO():
             COO_tensor[i+len(self.COO_list),2:] = edge_feature
             diode_nodes_tensor[i+len(self.COO_list),:] = diode_nodes
         return COO_tensor, diode_nodes_tensor
+    
+class GridCircuit():
+    def __init__(self,rows=8,cols=8):
+        self.rows = rows
+        self.cols = cols
+    def fill_nodes(self,num_nodes=None):
+        max_ = self.rows*self.cols
+        if num_nodes is None:
+            num_nodes = int(max_ * 0.8)
+        if num_nodes > max_:
+            num_nodes = max_
+        rand_perm = np.random.permutation(max_)
+        self.num_nodes = num_nodes
+        self.node_pos = rand_perm[:num_nodes]
+        self.node_rows = np.floor(self.node_pos / self.cols)
+        self.node_cols = self.node_pos - self.node_rows*self.cols
+        has_edge = np.ones(self.num_nodes, dtype=bool)
+        for i in range(self.num_nodes):
+            indices = np.where(np.abs(self.node_rows-self.node_rows[i])+np.abs(self.node_cols-self.node_cols[i])<=1)[0]
+            if len(indices)==1:
+                has_edge[i] = False
+        find_ = np.where(has_edge==True)[0]
+        self.node_pos = self.node_pos[find_]
+        self.node_rows = self.node_rows[find_]
+        self.node_cols = self.node_cols[find_]
+        self.num_nodes = len(find_)
+    def draw(self):
+        if hasattr(self,"node_cols"):
+            _, ax = plt.subplots()
+            if hasattr(self,"edges"):
+                for i, edge in enumerate(self.edges.T):
+                    # ax.plot(self.node_cols[edge],self.node_rows[edge],color="black")
+                    if self.node_rows[edge[1]] < self.node_rows[edge[0]]:
+                        rotation = 0
+                    elif self.node_rows[edge[1]] > self.node_rows[edge[0]]:
+                        rotation = 180
+                    elif self.node_cols[edge[1]] < self.node_cols[edge[0]]:
+                        rotation = 90
+                    else:
+                        rotation = -90
+                    text = f"{self.edge_value[i]:.2f}"
+                    if self.edge_type[i]==0:
+                        draw_resistor_symbol(ax, x=np.mean(self.node_cols[edge]), y=np.mean(self.node_rows[edge]), rotation=rotation)
+                    elif self.edge_type[i]==1:
+                        draw_CC_symbol(ax, x=np.mean(self.node_cols[edge]), y=np.mean(self.node_rows[edge]), rotation=rotation+180)
+                    else:
+                        draw_diode_symbol(ax, x=np.mean(self.node_cols[edge]), y=np.mean(self.node_rows[edge]), rotation=rotation)
+                        text = f"{self.edge_value[i]:.2e}"
+                    text_rotation = 0
+                    if rotation==90 or rotation==-90:
+                        text_rotation = 90
+                    ax.text(np.mean(self.node_cols[edge])+np.cos(text_rotation*np.pi/180)*0.2, np.mean(self.node_rows[edge])+np.sin(text_rotation*np.pi/180)*0.2, text, ha="center", va="center", fontsize=8, rotation=90-text_rotation)
+            if hasattr(self,"bc"):
+                for i in range(self.num_nodes):
+                    if not np.isnan(self.bc[i]):
+                        if self.bc[i]==0:
+                            draw_earth_symbol(ax,x=self.node_cols[i]+0.1-0.025, y=self.node_rows[i]-0.1+0.025,rotation=45)
+                        else:
+                            draw_pos_terminal_symbol(ax,x=self.node_cols[i], y=self.node_rows[i],color="red")
+                            text = f"{self.bc[i]:.2f}"
+                            ax.text(self.node_cols[i]+0.2, self.node_rows[i]-0.2, text, ha="center", va="center", fontsize=8,color="red")
+            ax.set_xlim(-1,self.cols)
+            ax.set_ylim(-1,self.rows)
+            plt.show()
+    def fill_edges(self,num_edges=None,linear_elements_only=False):
+        possible_edges = []
+        for i in range(self.num_nodes):
+            indices = np.where(np.abs(self.node_rows-self.node_rows[i])+np.abs(self.node_cols-self.node_cols[i])<=1)[0]
+            for index in indices:
+                possible_edges.append([i,index])
+        possible_edges = torch.tensor(possible_edges,dtype=torch.long)
+        find_ = torch.where(possible_edges[:,0]<possible_edges[:,1])[0]
+        possible_edges = possible_edges[find_]
+        max_ = possible_edges.shape[0]
+        if num_edges is None:
+            num_edges = int(max_ * 0.8)
+        if num_edges > max_:
+            num_edges = max_
+        rand_perm = torch.randperm(max_)
+        self.edges = possible_edges[rand_perm[:num_edges],:]
+        for i in range(self.num_nodes):
+            if not torch.any((self.edges[:, 0] == i) | (self.edges[:, 1] == i)):
+                is_in_possible = (possible_edges[:, 0] == i) | (possible_edges[:, 1] == i)
+                indices = is_in_possible.nonzero(as_tuple=True)[0]
+                if indices.numel() > 0:
+                    first_edge = possible_edges[indices[0]].unsqueeze(0)
+                    self.edges = torch.cat([self.edges, first_edge], dim=0)
+        num_edges = self.edges.shape[0]
+        polarity = torch.randint(0, 2, (num_edges,))
+        find_ = torch.where(polarity == 0)[0]
+        self.edges[find_] = self.edges[find_][:, [1, 0]]
+        self.edge_type = torch.zeros(num_edges, dtype=torch.long)
+        random_number = torch.rand(num_edges)  # uniform [0,1)
+        if linear_elements_only:
+            self.edge_type[random_number < 0.3] = 1
+        else:
+            self.edge_type[random_number < 0.3] = 1
+            self.edge_type[random_number > 0.7] = 2
+        print(self.edge_type)
+        for i in range(self.num_nodes):
+            if not torch.any(((self.edges[:, 0] == i) | (self.edges[:, 1] == i)) & (self.edge_type == 0)):
+                find2_ = torch.where(((self.edges[:,0]==i) | (self.edges[:,1]==i)))[0]
+                self.edge_type[find2_[0]] = 0
+        print(self.edge_type)
+        self.edge_value = torch.zeros(num_edges)
+        find_ = torch.where(self.edge_type==0)[0]
+        self.edge_value[find_] = torch.from_numpy(np.random.uniform(0.1, 1000.0, size=len(find_))).to(dtype=self.edge_value.dtype)
+        find_ = np.where(self.edge_type==1)[0]
+        self.edge_value[find_] = torch.from_numpy(np.random.uniform(0.1, 10, size=len(find_))).to(dtype=self.edge_value.dtype)
+        find_ = np.where(self.edge_type==2)[0]
+        self.edge_value[find_] = torch.from_numpy(10.0**(np.random.uniform(-13, -8, size=len(find_)))).to(dtype=self.edge_value.dtype)
+        self.edges = self.edges.T
+        data = pyg.data.Data(edge_index=self.edges, num_nodes=self.num_nodes)
+        G = to_networkx(data,to_undirected=True)
+        self.connected_components = list(nx.connected_components(G))
+    def fill_boundary_conditions(self):
+        self.bc = np.NaN*np.ones(self.num_nodes)
+        for i in range(self.num_nodes):
+            find_ = torch.where((self.edges[0,:]==i) | (self.edges[1,:]==i))[0]
+            if len(find_)<=1:
+                random_number = np.random.rand()
+                if random_number < 0.7:
+                    self.bc[i] = 0
+                else:
+                    self.bc[i] = np.random.rand()*10 - 5
+        for component in self.connected_components:
+            list_ = list(component)
+            if not np.any(~np.isnan(self.bc[list_])):
+                self.bc[list_[i]] = 0
+
+grid_circuit = GridCircuit()
+grid_circuit.fill_nodes()
+grid_circuit.fill_edges()
+grid_circuit.fill_boundary_conditions()
+grid_circuit.draw()
+assert(1==0)
     
 def assign_nodes(circuit_group,node_count=0):
     if node_count==0:
