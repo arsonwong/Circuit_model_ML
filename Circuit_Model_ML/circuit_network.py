@@ -42,7 +42,7 @@ class COO():
         # IL, cond, log_I0, n, breakdownV
         edge_feature = torch.zeros(1,5)
         edge_feature[0,3] = 1.0
-        # diode neg node, diode pos node, corresponding neg node, corresponding pos node
+        # diode neg node, diode pos node
         diode_nodes = torch.tensor([-1,-1], dtype=torch.long)
         if isinstance(element,PC_CurrentSource):
             ref_PC_diode = element.ref_PC_diode
@@ -78,9 +78,12 @@ class COO():
         return COO_tensor, diode_nodes_tensor
     
 class GridCircuit():
-    def __init__(self,rows=8,cols=8):
+    def __init__(self,rows=3,cols=3):
         self.rows = rows
         self.cols = cols
+        self.fill_nodes()
+        self.fill_edges()
+        self.fill_boundary_conditions()
     def fill_nodes(self,num_nodes=None):
         max_ = self.rows*self.cols
         if num_nodes is None:
@@ -140,7 +143,7 @@ class GridCircuit():
             ax.set_xlim(-1,self.cols)
             ax.set_ylim(-1,self.rows)
             plt.show()
-    def fill_edges(self,num_edges=None,linear_elements_only=False):
+    def fill_edges(self,num_edges=None,linear_elements_only=True):
         possible_edges = []
         for i in range(self.num_nodes):
             indices = np.where(np.abs(self.node_rows-self.node_rows[i])+np.abs(self.node_cols-self.node_cols[i])<=1)[0]
@@ -174,12 +177,10 @@ class GridCircuit():
         else:
             self.edge_type[random_number < 0.3] = 1
             self.edge_type[random_number > 0.7] = 2
-        print(self.edge_type)
         for i in range(self.num_nodes):
             if not torch.any(((self.edges[:, 0] == i) | (self.edges[:, 1] == i)) & (self.edge_type == 0)):
                 find2_ = torch.where(((self.edges[:,0]==i) | (self.edges[:,1]==i)))[0]
                 self.edge_type[find2_[0]] = 0
-        print(self.edge_type)
         self.edge_value = torch.zeros(num_edges)
         find_ = torch.where(self.edge_type==0)[0]
         self.edge_value[find_] = torch.from_numpy(np.random.uniform(0.1, 1000.0, size=len(find_))).to(dtype=self.edge_value.dtype)
@@ -205,14 +206,50 @@ class GridCircuit():
             list_ = list(component)
             if not np.any(~np.isnan(self.bc[list_])):
                 self.bc[list_[i]] = 0
+    def export(self):
+        COO_tensor = torch.zeros(2*self.edges.shape[1],7)
+        diode_nodes_tensor = torch.zeros(2*self.edges.shape[1],2,dtype=torch.long)
+        node_boundary_conditions = torch.zeros(self.num_nodes,3,dtype=torch.float)
+        for i, edge in enumerate(self.edges.T):
+            COO_tensor[i,0:2] = torch.tensor(edge, dtype=self.edges.dtype)
+            # IL, cond, log_I0, n, breakdownV
+            edge_feature = torch.zeros(1,5)
+            edge_feature[0,3] = 1.0
+            # diode neg node, diode pos node
+            diode_nodes = torch.tensor([-1,-1], dtype=torch.long)
+            if self.edge_type[i]==0:
+                edge_feature[0,1] = 1/self.edge_value[i]
+            elif self.edge_type[i]==1:
+                edge_feature[0,0] = self.edge_value[i]
+            elif self.edge_type[i]==2:
+                edge_feature[0,2] = np.log(self.edge_value[i])
+                diode_nodes = torch.tensor([edge[0],edge[1]], dtype=torch.long)
+            COO_tensor[i,2:] = edge_feature
+            diode_nodes_tensor[i,:] = diode_nodes
 
-grid_circuit = GridCircuit()
-grid_circuit.fill_nodes()
-grid_circuit.fill_edges()
-grid_circuit.fill_boundary_conditions()
-grid_circuit.draw()
-assert(1==0)
-    
+            COO_tensor[i+self.edges.shape[1],0:2] = torch.tensor(torch.flip(edge, dims=[0]), dtype=self.edges.dtype)
+            # IL, cond, log_I0, n, breakdownV
+            edge_feature = torch.zeros(1,5)
+            edge_feature[0,3] = 1.0
+            # diode neg node, diode pos node
+            diode_nodes = torch.tensor([-1,-1], dtype=torch.long)
+            if self.edge_type[i]==0:
+                edge_feature[0,1] = 1/self.edge_value[i]
+            elif self.edge_type[i]==1:
+                edge_feature[0,0] = -1*self.edge_value[i]
+            elif self.edge_type[i]==2:
+                edge_feature[0,2] = -1*np.log(self.edge_value[i])
+                diode_nodes = torch.tensor([edge[0], edge[1]], dtype=torch.long)
+            COO_tensor[i,2:] = edge_feature
+            diode_nodes_tensor[i,:] = diode_nodes
+            COO_tensor[i+self.edges.shape[1],2:] = edge_feature
+            diode_nodes_tensor[i+self.edges.shape[1],:] = diode_nodes
+        for i in range(self.num_nodes):
+            if not np.isnan(self.bc[i]):
+                node_boundary_conditions[i,0] = 1
+                node_boundary_conditions[i,1] = self.bc[i]
+        return COO_tensor, diode_nodes_tensor, node_boundary_conditions
+
 def assign_nodes(circuit_group,node_count=0):
     if node_count==0:
         circuit_group.neg_node = node_count
@@ -377,31 +414,39 @@ class LearnedSimulator(torch.nn.Module):
 
 
 if __name__ == "__main__":
-    tandem_model = pickle.load(open(r"C:\Users\arson\Documents\Tandem_Cell_Fit_Tools\best_fit_tandem_model.pkl", 'rb'))
-    tandem_model.cells[0].set_IL(0.0)
+    grid_circuit = GridCircuit()
 
-    target_I = 0
-    tandem_model.set_operating_point(I=target_I)
-    V1 = tandem_model.operating_point[0]
-    V3 = V1-tandem_model.subgroups[2].operating_point[0]
-    V2 = V3-tandem_model.subgroups[1].operating_point[0]    
-    insert_PC_currentsource(tandem_model)
-    assign_nodes(tandem_model)
-    tandem_model.draw(display_value=True)
-        
-    coo, diode_nodes_tensor = translate_to_COO(tandem_model)
+    grid_circuit.draw()
+    coo, diode_nodes_tensor, node_boundary_conditions = grid_circuit.export()
+    x = torch.zeros(grid_circuit.num_nodes,1)
     edge_index = coo[:,:2].long().t()
     edge_feature = coo[:,2:]
-    max_node_index = edge_index.max().item()
 
-    x = torch.tensor([0.0,V1,V2,V3])[:,None]
-    print("kaka1")
-    print(x)
-    # 0th index is the boundary condition:
-    # 0-not a boundary; 1-voltage pinning (Dirichlet boundary condition); 2-net current pinning
-    # 1st index is the voltage to pin (if 0th index is 1)
-    # 2nd index is the net current to pin (if 0th index is 2)
-    node_boundary_conditions = torch.tensor([[1,0,0],[2,0,target_I],[0,0,0],[0,0,0]],dtype=torch.float)
+    # tandem_model = pickle.load(open(r"C:\Users\arson\Documents\Tandem_Cell_Fit_Tools\best_fit_tandem_model.pkl", 'rb'))
+    # tandem_model.cells[0].set_IL(0.0)
+
+    # target_I = 0
+    # tandem_model.set_operating_point(I=target_I)
+    # V1 = tandem_model.operating_point[0]
+    # V3 = V1-tandem_model.subgroups[2].operating_point[0]
+    # V2 = V3-tandem_model.subgroups[1].operating_point[0]    
+    # insert_PC_currentsource(tandem_model)
+    # assign_nodes(tandem_model)
+    # tandem_model.draw(display_value=True)
+        
+    # coo, diode_nodes_tensor = translate_to_COO(tandem_model)
+    # edge_index = coo[:,:2].long().t()
+    # edge_feature = coo[:,2:]
+    # max_node_index = edge_index.max().item()
+
+    # x = torch.tensor([0.0,V1,V2,V3])[:,None]
+    # print("kaka1")
+    # print(x)
+    # # 0th index is the boundary condition:
+    # # 0-not a boundary; 1-voltage pinning (Dirichlet boundary condition); 2-net current pinning
+    # # 1st index is the voltage to pin (if 0th index is 1)
+    # # 2nd index is the net current to pin (if 0th index is 2)
+    # node_boundary_conditions = torch.tensor([[1,0,0],[2,0,target_I],[0,0,0],[0,0,0]],dtype=torch.float)
     cn = CircuitNetwork()
 
     data = pyg.data.Data(
