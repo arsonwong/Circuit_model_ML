@@ -78,7 +78,7 @@ class COO():
         return COO_tensor, diode_nodes_tensor
     
 class GridCircuit():
-    def __init__(self,rows=3,cols=3):
+    def __init__(self,rows=10,cols=10):
         self.rows = rows
         self.cols = cols
         self.fill_nodes()
@@ -116,12 +116,16 @@ class GridCircuit():
                     elif self.node_rows[edge[1]] > self.node_rows[edge[0]]:
                         rotation = 180
                     elif self.node_cols[edge[1]] < self.node_cols[edge[0]]:
-                        rotation = 90
-                    else:
                         rotation = -90
+                    else:
+                        rotation = 90
                     text = f"{self.edge_value[i]:.2f}"
                     if self.edge_type[i]==0:
                         draw_resistor_symbol(ax, x=np.mean(self.node_cols[edge]), y=np.mean(self.node_rows[edge]), rotation=rotation)
+                        if self.edge_value[i] >= 1.0:
+                            text = f"{self.edge_value[i]:.2f}"
+                        else:
+                            text = f"{self.edge_value[i]*1e3:.2f}m"
                     elif self.edge_type[i]==1:
                         draw_CC_symbol(ax, x=np.mean(self.node_cols[edge]), y=np.mean(self.node_rows[edge]), rotation=rotation+180)
                     else:
@@ -138,8 +142,20 @@ class GridCircuit():
                             draw_earth_symbol(ax,x=self.node_cols[i]+0.1-0.025, y=self.node_rows[i]-0.1+0.025,rotation=45)
                         else:
                             draw_pos_terminal_symbol(ax,x=self.node_cols[i], y=self.node_rows[i],color="red")
-                            text = f"{self.bc[i]:.2f}"
+                            if abs(self.bc[i]) >= 1:
+                                text = f"{i}:{self.bc[i]:.3f}"
+                            else:
+                                text = f"{i}:{self.bc[i]*1e3:.3f}m"
                             ax.text(self.node_cols[i]+0.2, self.node_rows[i]-0.2, text, ha="center", va="center", fontsize=8,color="red")
+            if hasattr(self,"voltages"):
+                for i in range(self.num_nodes):
+                    if abs(self.voltages[i].item()) >= 1:
+                        # text = f"{i}:{self.voltages[i].item():.3f}"
+                        text = f"{self.voltages[i].item():.3f}"
+                    else:
+                        # text = f"{i}:{self.voltages[i].item()*1e3:.3f}m"
+                        text = f"{self.voltages[i].item():.3f}"
+                    ax.text(self.node_cols[i]+0.2, self.node_rows[i]-0.1, text, ha="center", va="center", fontsize=8,color="blue")
             ax.set_xlim(-1,self.cols)
             ax.set_ylim(-1,self.rows)
             plt.show()
@@ -183,7 +199,7 @@ class GridCircuit():
                 self.edge_type[find2_[0]] = 0
         self.edge_value = torch.zeros(num_edges)
         find_ = torch.where(self.edge_type==0)[0]
-        self.edge_value[find_] = torch.from_numpy(np.random.uniform(0.1, 1000.0, size=len(find_))).to(dtype=self.edge_value.dtype)
+        self.edge_value[find_] = torch.from_numpy(10.0**(np.random.uniform(-3, 2, size=len(find_)))).to(dtype=self.edge_value.dtype)
         find_ = np.where(self.edge_type==1)[0]
         self.edge_value[find_] = torch.from_numpy(np.random.uniform(0.1, 10, size=len(find_))).to(dtype=self.edge_value.dtype)
         find_ = np.where(self.edge_type==2)[0]
@@ -236,19 +252,55 @@ class GridCircuit():
             if self.edge_type[i]==0:
                 edge_feature[0,1] = 1/self.edge_value[i]
             elif self.edge_type[i]==1:
-                edge_feature[0,0] = -1*self.edge_value[i]
+                edge_feature[0,0] = -self.edge_value[i]
             elif self.edge_type[i]==2:
                 edge_feature[0,2] = -1*np.log(self.edge_value[i])
                 diode_nodes = torch.tensor([edge[0], edge[1]], dtype=torch.long)
-            COO_tensor[i,2:] = edge_feature
-            diode_nodes_tensor[i,:] = diode_nodes
             COO_tensor[i+self.edges.shape[1],2:] = edge_feature
             diode_nodes_tensor[i+self.edges.shape[1],:] = diode_nodes
         for i in range(self.num_nodes):
             if not np.isnan(self.bc[i]):
                 node_boundary_conditions[i,0] = 1
                 node_boundary_conditions[i,1] = self.bc[i]
-        return COO_tensor, diode_nodes_tensor, node_boundary_conditions
+        starting_guess = torch.zeros(self.num_nodes,1)
+        edge_index = COO_tensor[:,:2].long().t()
+        edge_feature = COO_tensor[:,2:]
+
+        data = pyg.data.Data(
+            x=starting_guess,  
+            edge_index=edge_index,  
+            edge_attr=edge_feature, 
+            y=node_boundary_conditions,
+            diode_nodes_tensor = diode_nodes_tensor
+        )
+        
+        return data
+    
+    def solve(self):
+        data = self.export()
+        node_error = cn.forward(data)
+        rows = torch.where(data.y[:,0] != 1)[0]
+        indices = torch.where(data.y[:,0]==1) # pinned voltage boundary condition
+        data.x[indices[0],0] = data.y[indices[0],1]
+        x = data.x
+        print(x)
+        print(node_error)
+        for _ in range(5):
+            J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, 
+                                                                            edge_index=data.edge_index, 
+                                                                            edge_attr=data.edge_attr, 
+                                                                            diode_nodes_tensor=data.diode_nodes_tensor,
+                                                                            y=data.y)), x).squeeze()
+            J = J[rows][:, rows]
+            node_error = node_error[rows]
+            Y = -node_error
+            X = torch.linalg.solve(J, Y)
+            x[rows] = x[rows] + X
+            data.x = x
+            node_error = cn.forward(data)
+        print(x)
+        print(node_error)
+        self.voltages = x
 
 def assign_nodes(circuit_group,node_count=0):
     if node_count==0:
@@ -284,17 +336,16 @@ class CircuitNetwork(pyg.nn.MessagePassing):
     def forward(self, data, x=None):
         if x is None:
             x = data.x
+        
         return self.propagate(data.edge_index, x=(x,x), edge_feature=data.edge_attr, y=data.y, diode_nodes=data.diode_nodes_tensor, ref_x=x)
 
     def message(self, x_i, x_j, edge_feature, diode_nodes, ref_x):
         # resistor - current is positive from j --> i
         cond = edge_feature[:,1].unsqueeze(1)
         I = cond*(x_j - x_i)
-
         # current source
         IL = edge_feature[:,0].unsqueeze(1)
         I += IL
-
         # diode
         find_ = torch.where(diode_nodes[:,0]>=0)[0]
         diode_V_drop = (ref_x[diode_nodes[find_,1],0] - ref_x[diode_nodes[find_,0],0]).unsqueeze(1)
@@ -303,7 +354,6 @@ class CircuitNetwork(pyg.nn.MessagePassing):
         n = edge_feature[find_,3].unsqueeze(1)
         breakdownV = edge_feature[find_,4].unsqueeze(1)
         I[find_] -= I0*(torch.exp((diode_V_drop-breakdownV)/(n*0.02568))-1.0)
-
         return I
     
     def aggregate(self, inputs, index, dim_size=None, y=None):
@@ -414,13 +464,13 @@ class LearnedSimulator(torch.nn.Module):
 
 
 if __name__ == "__main__":
+    cn = CircuitNetwork()
     grid_circuit = GridCircuit()
 
+    
+    # data = grid_circuit.export()
+    grid_circuit.solve()
     grid_circuit.draw()
-    coo, diode_nodes_tensor, node_boundary_conditions = grid_circuit.export()
-    x = torch.zeros(grid_circuit.num_nodes,1)
-    edge_index = coo[:,:2].long().t()
-    edge_feature = coo[:,2:]
 
     # tandem_model = pickle.load(open(r"C:\Users\arson\Documents\Tandem_Cell_Fit_Tools\best_fit_tandem_model.pkl", 'rb'))
     # tandem_model.cells[0].set_IL(0.0)
@@ -447,40 +497,39 @@ if __name__ == "__main__":
     # # 1st index is the voltage to pin (if 0th index is 1)
     # # 2nd index is the net current to pin (if 0th index is 2)
     # node_boundary_conditions = torch.tensor([[1,0,0],[2,0,target_I],[0,0,0],[0,0,0]],dtype=torch.float)
-    cn = CircuitNetwork()
-
-    data = pyg.data.Data(
-        x=x,  
-        edge_index=edge_index,  
-        edge_attr=edge_feature, 
-        y=node_boundary_conditions,
-        diode_nodes_tensor = diode_nodes_tensor
-    )
-
-    node_error = cn.forward(data)
-    rows = torch.where(node_boundary_conditions[:,0] != 1)[0]
-
-    for i in range(5):
-        J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, edge_index=edge_index, edge_attr=edge_feature, diode_nodes_tensor=diode_nodes_tensor)), x).squeeze()
-        J = J[rows][:, rows]
-
-        node_error = node_error[rows]
-        Y = -node_error
-
-        X = torch.linalg.solve(J, Y)
-
-        x[rows] = x[rows] + X
-
-        data = pyg.data.Data(
-            x=x, 
-            edge_index=edge_index,  
-            edge_attr=edge_feature,
-            y=node_boundary_conditions,
-            diode_nodes_tensor=diode_nodes_tensor
-        )
-
-        node_error = cn.forward(data)
     
-    print("kaka")
-    print(x)
-    print(node_error)
+
+    # data = pyg.data.Data(
+    #     x=x,  
+    #     edge_index=edge_index,  
+    #     edge_attr=edge_feature, 
+    #     y=node_boundary_conditions,
+    #     diode_nodes_tensor = diode_nodes_tensor
+    # )
+
+    # node_error = cn.forward(data)
+    # rows = torch.where(data.y[:,0] != 1)[0]
+    # x = data.x
+
+    # for i in range(5):
+    #     J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, 
+    #                                                                        edge_index=data.edge_index, 
+    #                                                                        edge_attr=data.edge_attr, 
+    #                                                                        diode_nodes_tensor=data.diode_nodes_tensor,
+    #                                                                        y=data.y)), x).squeeze()
+    #     J = J[rows][:, rows]
+
+    #     node_error = node_error[rows]
+    #     Y = -node_error
+
+    #     X = torch.linalg.solve(J, Y)
+
+    #     x[rows] = x[rows] + X
+
+    #     data.x = x
+
+    #     node_error = cn.forward(data)
+    
+    # print("kaka")
+    # print(x)
+    # print(node_error)
