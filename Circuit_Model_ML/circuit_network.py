@@ -88,11 +88,6 @@ class GridCircuit():
         self.fill_edges()
         self.fill_boundary_conditions()
     def fill_nodes(self,num_nodes=None):
-        # self.num_nodes = 3
-        # self.node_pos = np.array([0,1,2])
-        # self.node_rows = np.floor(self.node_pos / self.cols)
-        # self.node_cols = self.node_pos - self.node_rows*self.cols
-
         max_ = self.rows*self.cols
         if num_nodes is None:
             num_nodes = int(max_ * 0.8)
@@ -168,13 +163,6 @@ class GridCircuit():
             ax.set_ylim(-1,self.rows)
             plt.show()
     def fill_edges(self,num_edges=None):
-        # self.edges = torch.tensor([[0,1],[1,2]],dtype=torch.long)
-        # num_edges = self.edges.shape[0]
-        # self.has_diode = True
-        # self.edge_type = torch.tensor([0,2],dtype=torch.long)
-        # self.edge_value = torch.tensor([1,1e-12])
-
-        self.has_diode = False
         possible_edges = []
         for i in range(self.num_nodes):
             indices = np.where(np.abs(self.node_rows-self.node_rows[i])+np.abs(self.node_cols-self.node_cols[i])<=1)[0]
@@ -218,8 +206,6 @@ class GridCircuit():
         find_ = np.where(self.edge_type==1)[0]
         self.edge_value[find_] = torch.from_numpy(np.random.uniform(0.1, 10, size=len(find_))).to(dtype=self.edge_value.dtype)
         find_ = np.where(self.edge_type==2)[0]
-        if len(find_) > 0:
-            self.has_diode = True
         self.edge_value[find_] = torch.from_numpy(10.0**(np.random.uniform(-13, -8, size=len(find_)))).to(dtype=self.edge_value.dtype)
         self.edges = self.edges.T
 
@@ -227,14 +213,12 @@ class GridCircuit():
         G = to_networkx(data,to_undirected=True)
         self.connected_components = list(nx.connected_components(G))
     def fill_boundary_conditions(self):
-        # self.bc = np.array([0.9,np.NaN,0])
-
         self.bc = np.NaN*np.ones(self.num_nodes)
         for i in range(self.num_nodes):
             find_ = torch.where((self.edges[0,:]==i) | (self.edges[1,:]==i))[0]
             if len(find_)<=1:
                 random_number = np.random.rand()
-                if random_number < 0.7:
+                if random_number < 0.3:
                     self.bc[i] = 0
                 else:
                     self.bc[i] = np.random.rand()*10 - 5
@@ -306,7 +290,7 @@ class GridCircuit():
         data.x[indices[0],0] = data.y[indices[0],1]
         node_error = cn.forward(data)
         x = data.x
-        for i in range(10):
+        for _ in range(50):
             J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, 
                                                                             edge_index=data.edge_index, 
                                                                             edge_attr=data.edge_attr, 
@@ -500,11 +484,11 @@ class LearnedSimulator(torch.nn.Module):
 
 
 if __name__ == "__main__":
-    # cn = CircuitNetwork()
-    # grid_circuit = GridCircuit()
+    cn = CircuitNetwork()
+    grid_circuit = GridCircuit()
 
-    # with open("grid_circuit.pkl", "wb") as f:
-    #     pickle.dump(grid_circuit, f)
+    with open("grid_circuit.pkl", "wb") as f:
+        pickle.dump(grid_circuit, f)
 
     with open("grid_circuit.pkl", "rb") as f:
         grid_circuit = pickle.load(f)
