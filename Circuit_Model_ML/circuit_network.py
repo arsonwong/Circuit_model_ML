@@ -78,13 +78,21 @@ class COO():
         return COO_tensor, diode_nodes_tensor
     
 class GridCircuit():
-    def __init__(self,rows=10,cols=10):
+    diode_V_hard_limit = 0.8
+    diode_V_pos_delta_limit = 0.5
+    def __init__(self,rows=4,cols=4,is_linear=False):
         self.rows = rows
         self.cols = cols
+        self.is_linear = is_linear
         self.fill_nodes()
         self.fill_edges()
         self.fill_boundary_conditions()
     def fill_nodes(self,num_nodes=None):
+        # self.num_nodes = 3
+        # self.node_pos = np.array([0,1,2])
+        # self.node_rows = np.floor(self.node_pos / self.cols)
+        # self.node_cols = self.node_pos - self.node_rows*self.cols
+
         max_ = self.rows*self.cols
         if num_nodes is None:
             num_nodes = int(max_ * 0.8)
@@ -150,16 +158,23 @@ class GridCircuit():
             if hasattr(self,"voltages"):
                 for i in range(self.num_nodes):
                     if abs(self.voltages[i].item()) >= 1:
-                        # text = f"{i}:{self.voltages[i].item():.3f}"
-                        text = f"{self.voltages[i].item():.3f}"
+                        text = f"{i}:{self.voltages[i].item():.3f}"
+                        # text = f"{self.voltages[i].item():.3f}"
                     else:
-                        # text = f"{i}:{self.voltages[i].item()*1e3:.3f}m"
-                        text = f"{self.voltages[i].item():.3f}"
+                        text = f"{i}:{self.voltages[i].item()*1e3:.3f}m"
+                        # text = f"{self.voltages[i].item():.3f}"
                     ax.text(self.node_cols[i]+0.2, self.node_rows[i]-0.1, text, ha="center", va="center", fontsize=8,color="blue")
             ax.set_xlim(-1,self.cols)
             ax.set_ylim(-1,self.rows)
             plt.show()
-    def fill_edges(self,num_edges=None,linear_elements_only=True):
+    def fill_edges(self,num_edges=None):
+        # self.edges = torch.tensor([[0,1],[1,2]],dtype=torch.long)
+        # num_edges = self.edges.shape[0]
+        # self.has_diode = True
+        # self.edge_type = torch.tensor([0,2],dtype=torch.long)
+        # self.edge_value = torch.tensor([1,1e-12])
+
+        self.has_diode = False
         possible_edges = []
         for i in range(self.num_nodes):
             indices = np.where(np.abs(self.node_rows-self.node_rows[i])+np.abs(self.node_cols-self.node_cols[i])<=1)[0]
@@ -188,7 +203,7 @@ class GridCircuit():
         self.edges[find_] = self.edges[find_][:, [1, 0]]
         self.edge_type = torch.zeros(num_edges, dtype=torch.long)
         random_number = torch.rand(num_edges)  # uniform [0,1)
-        if linear_elements_only:
+        if self.is_linear:
             self.edge_type[random_number < 0.3] = 1
         else:
             self.edge_type[random_number < 0.3] = 1
@@ -203,12 +218,17 @@ class GridCircuit():
         find_ = np.where(self.edge_type==1)[0]
         self.edge_value[find_] = torch.from_numpy(np.random.uniform(0.1, 10, size=len(find_))).to(dtype=self.edge_value.dtype)
         find_ = np.where(self.edge_type==2)[0]
+        if len(find_) > 0:
+            self.has_diode = True
         self.edge_value[find_] = torch.from_numpy(10.0**(np.random.uniform(-13, -8, size=len(find_)))).to(dtype=self.edge_value.dtype)
         self.edges = self.edges.T
+
         data = pyg.data.Data(edge_index=self.edges, num_nodes=self.num_nodes)
         G = to_networkx(data,to_undirected=True)
         self.connected_components = list(nx.connected_components(G))
     def fill_boundary_conditions(self):
+        # self.bc = np.array([0.9,np.NaN,0])
+
         self.bc = np.NaN*np.ones(self.num_nodes)
         for i in range(self.num_nodes):
             find_ = torch.where((self.edges[0,:]==i) | (self.edges[1,:]==i))[0]
@@ -221,7 +241,7 @@ class GridCircuit():
         for component in self.connected_components:
             list_ = list(component)
             if not np.any(~np.isnan(self.bc[list_])):
-                self.bc[list_[i]] = 0
+                self.bc[list_[0]] = 0
     def export(self):
         COO_tensor = torch.zeros(2*self.edges.shape[1],7)
         diode_nodes_tensor = torch.zeros(2*self.edges.shape[1],2,dtype=torch.long)
@@ -238,8 +258,8 @@ class GridCircuit():
             elif self.edge_type[i]==1:
                 edge_feature[0,0] = self.edge_value[i]
             elif self.edge_type[i]==2:
-                edge_feature[0,2] = np.log(self.edge_value[i])
-                diode_nodes = torch.tensor([edge[0],edge[1]], dtype=torch.long)
+                edge_feature[0,2] = -np.log(self.edge_value[i])
+                diode_nodes = torch.tensor([edge[1],edge[0]], dtype=torch.long)
             COO_tensor[i,2:] = edge_feature
             diode_nodes_tensor[i,:] = diode_nodes
 
@@ -254,8 +274,8 @@ class GridCircuit():
             elif self.edge_type[i]==1:
                 edge_feature[0,0] = -self.edge_value[i]
             elif self.edge_type[i]==2:
-                edge_feature[0,2] = -1*np.log(self.edge_value[i])
-                diode_nodes = torch.tensor([edge[0], edge[1]], dtype=torch.long)
+                edge_feature[0,2] = np.log(self.edge_value[i])
+                diode_nodes = torch.tensor([edge[1], edge[0]], dtype=torch.long)
             COO_tensor[i+self.edges.shape[1],2:] = edge_feature
             diode_nodes_tensor[i+self.edges.shape[1],:] = diode_nodes
         for i in range(self.num_nodes):
@@ -278,28 +298,43 @@ class GridCircuit():
     
     def solve(self):
         data = self.export()
-        node_error = cn.forward(data)
+        cn = CircuitNetwork()
+        find_ = torch.where(data.diode_nodes_tensor[:self.edges.shape[1],0]>=0)[0]
+        diode_edges = data.diode_nodes_tensor[find_,:]
         rows = torch.where(data.y[:,0] != 1)[0]
         indices = torch.where(data.y[:,0]==1) # pinned voltage boundary condition
         data.x[indices[0],0] = data.y[indices[0],1]
+        node_error = cn.forward(data)
         x = data.x
-        print(x)
-        print(node_error)
-        for _ in range(5):
+        for i in range(10):
             J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, 
                                                                             edge_index=data.edge_index, 
                                                                             edge_attr=data.edge_attr, 
                                                                             diode_nodes_tensor=data.diode_nodes_tensor,
                                                                             y=data.y)), x).squeeze()
             J = J[rows][:, rows]
-            node_error = node_error[rows]
-            Y = -node_error
+            Y = -node_error[rows]
+            delta_x = torch.zeros_like(x)
             X = torch.linalg.solve(J, Y)
-            x[rows] = x[rows] + X
+            delta_x[rows] = X
+            ratio = 1.0
+            if diode_edges.shape[0] > 0:
+                delta_diode_V = delta_x[diode_edges[:,1]]-delta_x[diode_edges[:,0]]
+                max_diode_V_pos_delta = torch.max(delta_diode_V).item()
+                old_diode_V = x[diode_edges[:,1]]-x[diode_edges[:,0]]
+                new_diode_V = old_diode_V + delta_diode_V
+                max_diode_V_index = torch.argmax(new_diode_V)
+                if max_diode_V_pos_delta > self.diode_V_pos_delta_limit:
+                    ratio = self.diode_V_pos_delta_limit/max_diode_V_pos_delta
+                if new_diode_V[max_diode_V_index] > self.diode_V_hard_limit:
+                    ratio = min(ratio,(self.diode_V_hard_limit-old_diode_V[max_diode_V_index])/delta_diode_V[max_diode_V_index])
+            x = x + delta_x*ratio
             data.x = x
             node_error = cn.forward(data)
-        print(x)
-        print(node_error)
+            
+            RMS = torch.sqrt(torch.mean(node_error**2))
+            if RMS < 1e-4:
+                break
         self.voltages = x
 
 def assign_nodes(circuit_group,node_count=0):
@@ -349,6 +384,7 @@ class CircuitNetwork(pyg.nn.MessagePassing):
         # diode
         find_ = torch.where(diode_nodes[:,0]>=0)[0]
         diode_V_drop = (ref_x[diode_nodes[find_,1],0] - ref_x[diode_nodes[find_,0],0]).unsqueeze(1)
+    
         log_I0 = edge_feature[find_,2].unsqueeze(1)
         I0 = -torch.sign(log_I0)*torch.exp(-torch.abs(log_I0))
         n = edge_feature[find_,3].unsqueeze(1)
@@ -464,9 +500,16 @@ class LearnedSimulator(torch.nn.Module):
 
 
 if __name__ == "__main__":
-    cn = CircuitNetwork()
-    grid_circuit = GridCircuit()
+    # cn = CircuitNetwork()
+    # grid_circuit = GridCircuit()
 
+    # with open("grid_circuit.pkl", "wb") as f:
+    #     pickle.dump(grid_circuit, f)
+
+    with open("grid_circuit.pkl", "rb") as f:
+        grid_circuit = pickle.load(f)
+
+    grid_circuit.draw()
     
     # data = grid_circuit.export()
     grid_circuit.solve()
