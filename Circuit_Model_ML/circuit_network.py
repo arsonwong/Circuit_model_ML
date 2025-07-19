@@ -82,7 +82,7 @@ class GridCircuit():
             if not torch.any(((self.edges[:, 0] == i) | (self.edges[:, 1] == i)) & (self.edge_type == 0)):
                 find2_ = torch.where(((self.edges[:,0]==i) | (self.edges[:,1]==i)))[0]
                 self.edge_type[find2_[0]] = 0
-        self.edge_value = torch.zeros(num_edges)
+        self.edge_value = torch.zeros(num_edges, dtype=torch.double)
         find_ = torch.where(self.edge_type==0)[0]
         self.edge_value[find_] = torch.from_numpy(10.0**(np.random.uniform(-3, 2, size=len(find_)))).to(dtype=self.edge_value.dtype)
         find_ = np.where(self.edge_type==1)[0]
@@ -109,13 +109,13 @@ class GridCircuit():
             if not np.any(~np.isnan(self.bc[list_])):
                 self.bc[list_[0]] = 0
     def export(self):
-        COO_tensor = torch.zeros(2*self.edges.shape[1],7)
+        COO_tensor = torch.zeros(2*self.edges.shape[1],7,dtype=torch.double)
         diode_nodes_tensor = torch.zeros(2*self.edges.shape[1],2,dtype=torch.long)
-        node_boundary_conditions = torch.zeros(self.num_nodes,3,dtype=torch.float)
+        node_boundary_conditions = torch.zeros(self.num_nodes,3,dtype=torch.double)
         for i, edge in enumerate(self.edges.T):
             COO_tensor[i,0:2] = edge.clone().detach()
             # IL, cond, log_I0, n, breakdownV
-            edge_feature = torch.zeros(1,5)
+            edge_feature = torch.zeros(1,5,dtype=torch.double)
             edge_feature[0,3] = 1.0
             # diode neg node, diode pos node
             diode_nodes = torch.tensor([-1,-1], dtype=torch.long)
@@ -131,7 +131,7 @@ class GridCircuit():
 
             COO_tensor[i+self.edges.shape[1],0:2] = torch.flip(edge, dims=[0]).clone().detach()
             # IL, cond, log_I0, n, breakdownV
-            edge_feature = torch.zeros(1,5)
+            edge_feature = torch.zeros(1,5,dtype=torch.double)
             edge_feature[0,3] = 1.0
             # diode neg node, diode pos node
             diode_nodes = torch.tensor([-1,-1], dtype=torch.long)
@@ -148,7 +148,7 @@ class GridCircuit():
             if not np.isnan(self.bc[i]):
                 node_boundary_conditions[i,0] = 1
                 node_boundary_conditions[i,1] = self.bc[i]
-        starting_guess = torch.zeros(self.num_nodes,1)
+        starting_guess = torch.zeros(self.num_nodes,1,dtype=torch.double)
         edge_index = COO_tensor[:,:2].long().t()
         edge_feature = COO_tensor[:,2:]
 
@@ -161,12 +161,10 @@ class GridCircuit():
         )
         
         return data
-    def solve(self):
+    def solve(self, convergence_RMS=1e-8):
         data = self.export()
-        success, x = solve_circuit(data)
-        if success:
-            self.voltages = x
-        return success
+        success, self.voltages, RMS = solve_circuit(data, convergence_RMS=convergence_RMS)
+        return success, RMS
     def draw(self):
         if hasattr(self,"node_cols"):
             _, ax = plt.subplots()
@@ -222,7 +220,7 @@ class GridCircuit():
             ax.set_ylim(-1,self.rows)
             plt.show()
 
-def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,convergence_RMS=1e-4):
+def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,convergence_RMS=1e-8):
     cn = CircuitNetwork()
     find_ = torch.where(data.diode_nodes_tensor[:data.edge_index.shape[1] // 2,0]>=0)[0]
     diode_edges = data.diode_nodes_tensor[find_,:]
@@ -244,8 +242,7 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
             X = torch.linalg.solve(J, Y)
         except Exception as e:
             print(f"Linear solver error: {e}")
-            return False, None
-        
+            return False, None, None
         delta_x[rows] = X
         ratio = 1.0
         if diode_edges.shape[0] > 0:
@@ -262,13 +259,13 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
         data.x = x
         node_error = cn.forward(data)
         
-        RMS = torch.sqrt(torch.mean(node_error**2))
+        RMS = torch.sqrt(torch.mean(node_error**2)).item()
         if RMS < convergence_RMS:
             break
     if RMS < convergence_RMS:
-        return True, x
-    print("Non convergence: RMS = ", RMS.item())
-    return False, None
+        return True, x, RMS
+    print("Non convergence: RMS = ", RMS)
+    return False, x, RMS
         
 class CircuitNetwork(pyg.nn.MessagePassing):
     def forward(self, data, x=None):
@@ -412,53 +409,7 @@ if __name__ == "__main__":
         grid_circuit = pickle.load(f)
 
     grid_circuit.draw()
+    _, RMS = grid_circuit.solve(convergence_RMS=1e-8)
+    grid_circuit.draw()
+    print(RMS)
     
-    success = grid_circuit.solve()
-    if success:
-        grid_circuit.draw()
-    assert(1==0)
-
-    # cn = CircuitNetwork()
-    # tandem_model = pickle.load(open(r"C:\Users\arson\Documents\Tandem_Cell_Fit_Tools\best_fit_tandem_model.pkl", 'rb'))
-    # tandem_model.cells[0].set_IL(0.0)
-
-    # target_I = 0
-    # tandem_model.set_operating_point(I=target_I)
-    # V1 = tandem_model.operating_point[0]
-    # V3 = V1-tandem_model.subgroups[2].operating_point[0]
-    # V2 = V3-tandem_model.subgroups[1].operating_point[0]    
-    # insert_PC_currentsource(tandem_model)
-    # assign_nodes(tandem_model)
-    # tandem_model.draw(display_value=True)
-        
-    # coo, diode_nodes_tensor = translate_to_COO(tandem_model)
-    # edge_index = coo[:,:2].long().t()
-    # edge_feature = coo[:,2:]
-    # max_node_index = edge_index.max().item()
-
-    # x = torch.tensor([0.0,V1,V2,V3])[:,None]
-    # print("kaka1")
-
-    # print(x)
-    # # 0th index is the boundary condition:
-    # # 0-not a boundary; 1-voltage pinning (Dirichlet boundary condition); 2-net current pinning
-    # # 1st index is the voltage to pin (if 0th index is 1)
-    # # 2nd index is the net current to pin (if 0th index is 2)
-    # node_boundary_conditions = torch.tensor([[1,0,0],[2,0,target_I],[0,0,0],[0,0,0]],dtype=torch.float)
-    
-    # data = pyg.data.Data(
-    #     x=x,  
-    #     edge_index=edge_index,  
-    #     edge_attr=edge_feature, 
-    #     y=node_boundary_conditions,
-    #     diode_nodes_tensor = diode_nodes_tensor
-    # )
-    # node_error = cn.forward(data)
-    # print(node_error)
-
-    # success, x = solve_circuit(data)
-    
-    # print("kaka")
-    # print(x)
-    # node_error = cn.forward(data)
-    # print(node_error)
