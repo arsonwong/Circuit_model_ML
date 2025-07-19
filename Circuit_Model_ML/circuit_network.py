@@ -231,7 +231,7 @@ class GridCircuit():
         diode_nodes_tensor = torch.zeros(2*self.edges.shape[1],2,dtype=torch.long)
         node_boundary_conditions = torch.zeros(self.num_nodes,3,dtype=torch.float)
         for i, edge in enumerate(self.edges.T):
-            COO_tensor[i,0:2] = torch.tensor(edge, dtype=self.edges.dtype)
+            COO_tensor[i,0:2] = edge.clone().detach()
             # IL, cond, log_I0, n, breakdownV
             edge_feature = torch.zeros(1,5)
             edge_feature[0,3] = 1.0
@@ -247,7 +247,7 @@ class GridCircuit():
             COO_tensor[i,2:] = edge_feature
             diode_nodes_tensor[i,:] = diode_nodes
 
-            COO_tensor[i+self.edges.shape[1],0:2] = torch.tensor(torch.flip(edge, dims=[0]), dtype=self.edges.dtype)
+            COO_tensor[i+self.edges.shape[1],0:2] = torch.flip(edge, dims=[0]).clone().detach()
             # IL, cond, log_I0, n, breakdownV
             edge_feature = torch.zeros(1,5)
             edge_feature[0,3] = 1.0
@@ -299,7 +299,12 @@ class GridCircuit():
             J = J[rows][:, rows]
             Y = -node_error[rows]
             delta_x = torch.zeros_like(x)
-            X = torch.linalg.solve(J, Y)
+            try:
+                X = torch.linalg.solve(J, Y)
+            except Exception as e:
+                print(f"Linear solver error: {e}")
+                return False
+            
             delta_x[rows] = X
             ratio = 1.0
             if diode_edges.shape[0] > 0:
@@ -320,6 +325,10 @@ class GridCircuit():
             if RMS < 1e-4:
                 break
         self.voltages = x
+        if RMS < 1e-4:
+            return True
+        print("Non convergence: RMS = ", RMS.item())
+        return False
 
 def assign_nodes(circuit_group,node_count=0):
     if node_count==0:
@@ -485,19 +494,19 @@ class LearnedSimulator(torch.nn.Module):
 
 if __name__ == "__main__":
     cn = CircuitNetwork()
-    grid_circuit = GridCircuit()
+    # grid_circuit = GridCircuit()
 
-    with open("grid_circuit.pkl", "wb") as f:
-        pickle.dump(grid_circuit, f)
+    # with open("grid_circuit.pkl", "wb") as f:
+    #     pickle.dump(grid_circuit, f)
 
     with open("grid_circuit.pkl", "rb") as f:
         grid_circuit = pickle.load(f)
 
     grid_circuit.draw()
     
-    # data = grid_circuit.export()
-    grid_circuit.solve()
-    grid_circuit.draw()
+    success = grid_circuit.solve()
+    if success:
+        grid_circuit.draw()
 
     # tandem_model = pickle.load(open(r"C:\Users\arson\Documents\Tandem_Cell_Fit_Tools\best_fit_tandem_model.pkl", 'rb'))
     # tandem_model.cells[0].set_IL(0.0)
