@@ -10,10 +10,11 @@ from .utilities import *
 class GridCircuit():
     diode_V_hard_limit = 0.8
     diode_V_pos_delta_limit = 0.5
-    def __init__(self,rows=4,cols=4,is_linear=False):
+    def __init__(self,rows=4,cols=4,is_linear=False,has_current_source=True):
         self.rows = rows
         self.cols = cols
         self.is_linear = is_linear
+        self.has_current_source = has_current_source
         self.fill_nodes()
         self.fill_edges()
         self.fill_boundary_conditions()
@@ -68,10 +69,15 @@ class GridCircuit():
         self.edge_type = torch.zeros(num_edges, dtype=torch.long)
         random_number = torch.rand(num_edges)  # uniform [0,1)
         if self.is_linear:
-            self.edge_type[random_number < 0.3] = 1
+            if self.has_current_source:
+                self.edge_type[random_number < 0.3] = 1
         else:
-            self.edge_type[random_number < 0.3] = 1
-            self.edge_type[random_number > 0.7] = 2
+            if self.has_current_source:
+                self.edge_type[random_number < 0.3] = 1
+                self.edge_type[random_number > 0.7] = 2
+            else:
+                self.edge_type[random_number > 0.6] = 2
+            
         for i in range(self.num_nodes):
             if not torch.any(((self.edges[:, 0] == i) | (self.edges[:, 1] == i)) & (self.edge_type == 0)):
                 find2_ = torch.where(((self.edges[:,0]==i) | (self.edges[:,1]==i)))[0]

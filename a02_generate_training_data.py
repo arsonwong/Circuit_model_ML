@@ -4,14 +4,14 @@ import pickle
 import os
 
 folder = "data"
-data_num = {"train": 10000, "val": 1000}
+data_num = {"train": 100000, "val": 10000}
 
 for iter in ["train","val"]:
     filepath = folder+"/"+iter
     os.makedirs(filepath, exist_ok=True)
     pbar = tqdm(total=data_num[iter],desc="Generating " + iter + " data")
     while pbar.n < data_num[iter]:
-        grid_circuit = GridCircuit(rows=4,cols=4,is_linear=False) # makes a random grid circuit each time
+        grid_circuit = GridCircuit(rows=4,cols=4,is_linear=True,has_current_source=False) # makes a random grid circuit each time
         data = grid_circuit.export()
         success, _ = grid_circuit.solve(convergence_RMS=1e-8,suppress_warning=True)
         if success:

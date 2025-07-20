@@ -11,7 +11,7 @@ from Circuit_Model_ML.circuit_network import *
 import os
 
 # ==== Hyperparameters ====
-epochs = 28
+epochs = 100
 current_epoch = -1
 batch_size = 256
 learning_rate = 1e-6
@@ -49,51 +49,49 @@ class Dataset(pyg.data.Dataset):
         self.data_path = data_path
         self.split = split
         self.single_example = single_example
-        self.size = len([f for f in os.listdir(f"{self.data_path}/{self.split}")])
-    
+        max_size = len([f for f in os.listdir(f"{self.data_path}/{self.split}")])
+        self.data_set = []
+        for i in tqdm(range(max_size), desc=f"Loading {split} dataset"):
+            file_path = f"{self.data_path}/{self.split}/sample_{i}.pkl"
+            if not os.path.exists(file_path):
+                break
+            with open(f"{self.data_path}/{self.split}/sample_{i}.pkl", "rb") as f:
+                instance = pickle.load(f)
+            data = instance["data"]
+            answer = instance["answer"]
+            data.answer = answer.clone().float()
+            data.x = data.y.clone().float()
+            data.y = data.y.float()
+            data.edge_attr = data.edge_attr.float()
+            self.data_set.append(data)
+
     def len(self):
-        return self.size
+        return len(self.data_set)
     
     def get(self, idx):
         idx_ = 0
         if self.single_example is False:
             idx_ = idx
-        with open(f"{self.data_path}/{self.split}/sample_{idx_}.pkl", "rb") as f:
-            instance = pickle.load(f)
-        data = instance["data"]
-        answer = instance["answer"]
-        data.answer = data.x.clone().float()
-        data.x = data.y.clone().float()
-        data.y = data.y.float()
-        data.edge_attr = data.edge_attr.float()
-        return data
+        return self.data_set[idx_]
 
 def weight_file_name(path,current_epoch,supervised,single_example):
     return f"{path}/model_epoch_{current_epoch}_supervised={supervised}_single_example={single_example}.pt"
 
 if __name__ == "__main__":
-    target_I = 4
-    node_boundary_conditions = torch.tensor([[1,0,0],[2,0,target_I],[0,0,0],[0,0,0]],dtype=torch.float)
     cn = CircuitNetwork()
-
-    tandem_model = pickle.load(open(r"C:\Users\arson\Documents\Tandem_Cell_Fit_Tools\best_fit_tandem_model.pkl", 'rb'))
-    # generate_data(tandem_model, "../data","train",100000)
-    # generate_data(tandem_model, "../data","val",10000)
-    # assert(1==0)
-
+    train_dataset = Dataset("data","train")
+    val_dataset = Dataset("data","val")
     for supervised in [True,False]:
         for single_example in [False,True]:
             # ==== Model, loss, optimizer ====
             # model = LearnedSimulator(hidden_size=128,n_mp_layers=10).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-            model = LearnedSimulator(hidden_size=32,n_mp_layers=4).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+            model = LearnedSimulator(hidden_size=32,n_mp_layers=20).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
             total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
             print(f"Total trainable parameters: {total_params}")
             if current_epoch >= 0:
                 model.load_state_dict(torch.load(weight_file_name(weight_path,current_epoch,supervised,single_example)))
             optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-            train_dataset = Dataset("data","train",single_example=single_example)
-            val_dataset = Dataset("data","val")
+            train_dataset.single_example = single_example
             train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
             val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate_fn)
 
@@ -143,6 +141,11 @@ if __name__ == "__main__":
                             y=batch.y
                         )
                         node_error = cn.forward(data)
+                        print(batch.answer)
+                        print(output)
+                        print(node_error)
+                        assert(1==0)
+
                         if node_error.dim() == 2 and node_error.shape[1] == 1:
                             node_error = node_error.squeeze(1)
                         loss3 = torch.sum(node_error**2) # continuity from the answer
@@ -170,4 +173,5 @@ if __name__ == "__main__":
                     print(f"[Epoch {epoch+1}] Loss: {avg_loss[1]:.4e}")
                     with open(f"loss_log_supervised={supervised}_single_example={single_example}.txt", "a") as f:
                         f.write(f"Epoch {epoch+1} | {train_val} | Losses: {avg_loss.tolist()}\n")
+                os.makedirs(weight_path, exist_ok=True)
                 torch.save(model.state_dict(), weight_file_name(weight_path,epoch+1,supervised,single_example))
