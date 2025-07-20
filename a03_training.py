@@ -4,7 +4,10 @@ import torch.optim as optim
 from torch.utils.data import DataLoader  # for batching graphs
 from torch_geometric.data import Batch
 from tqdm import tqdm  # for progress bar
-from circuit_network import *
+import pickle
+import torch_geometric as pyg
+from Circuit_Model_ML.circuit_network_ML import *
+from Circuit_Model_ML.circuit_network import *
 import os
 
 # ==== Hyperparameters ====
@@ -12,76 +15,7 @@ epochs = 28
 current_epoch = -1
 batch_size = 256
 learning_rate = 1e-6
-weight_path = "../weights/"
-
-def generate_data(tandem_model, data_path, split, num=10000):
-    tandem_model_clone = circuit_deepcopy(tandem_model)
-    data_ = []
-    for i in tqdm(range(num)):
-        scales = np.random.lognormal(0.0, 0.2, size=7)
-        tandem_model.cells[0].set_I01(tandem_model_clone.cells[0].I01()*scales[0])
-        tandem_model.cells[0].set_I02(tandem_model_clone.cells[0].I02()*scales[1])
-        tandem_model.cells[0].set_shunt_cond(tandem_model_clone.cells[0].shunt_cond()*scales[2])
-        tandem_model.cells[1].set_I01(tandem_model_clone.cells[1].I01()*scales[3])
-        tandem_model.cells[1].set_I02(tandem_model_clone.cells[1].I02()*scales[4])
-        tandem_model.cells[1].set_shunt_cond(tandem_model_clone.cells[1].shunt_cond()*scales[5])
-        tandem_model.set_Rs(tandem_model_clone.Rs()*scales[6])
-
-        target_I = 4
-        tandem_model.set_operating_point(I=target_I)
-        V1 = tandem_model.operating_point[0]
-        V3 = V1-tandem_model.subgroups[2].operating_point[0]
-        V2 = V3-tandem_model.subgroups[1].operating_point[0]
-        x = torch.tensor([0.0,V1,V2,V3])[:,None]
-
-        coo, diode_nodes_tensor = translate_to_COO(tandem_model)
-        edge_index = coo[:,:2].long().t()
-        edge_feature = coo[:,2:]
-
-        data = pyg.data.Data(
-            x=x,  
-            edge_index=edge_index,  
-            edge_attr=edge_feature, 
-            y=node_boundary_conditions,
-            diode_nodes_tensor=diode_nodes_tensor
-        )
-        node_error = cn.forward(data)
-        rows = torch.where(node_boundary_conditions[:,0] != 1)[0]
-        for j in range(7):
-            def f(x_):
-                data = pyg.data.Data(x=x_, edge_index=edge_index, edge_attr=edge_feature,diode_nodes_tensor=diode_nodes_tensor)
-                return cn(data)
-
-            J = torch.autograd.functional.jacobian(f, x).squeeze()
-            J = J[rows][:, rows]
-
-            node_error = node_error[rows]
-            Y = -node_error
-
-            X = torch.linalg.solve(J, Y)
-
-            x[rows] = x[rows] + X
-
-            data = pyg.data.Data(
-                x=x, 
-                edge_index=edge_index,  
-                edge_attr=edge_feature,
-                y=node_boundary_conditions,
-                diode_nodes_tensor=diode_nodes_tensor
-            )
-
-            node_error = cn.forward(data)
-        assert(torch.sum(node_error**2).item() < 1e-12*4)
-        data_.append((node_boundary_conditions,edge_index,edge_feature,x,diode_nodes_tensor))
-        if i > 0 and i % 10000 == 0:
-            # pickle dump the data
-            out_path = os.path.join(data_path, f"{split}.pkl")
-            with open(out_path, "wb") as f:
-                pickle.dump(data_, f)
-    # pickle dump the data
-    out_path = os.path.join(data_path, f"{split}.pkl")
-    with open(out_path, "wb") as f:
-        pickle.dump(data_, f)
+weight_path = "weights/"
 
 def custom_collate_fn(data_list):
     # Standard PyG batching (handles x, edge_index, edge_attr, y, etc.)
@@ -115,31 +49,27 @@ class Dataset(pyg.data.Dataset):
         self.data_path = data_path
         self.split = split
         self.single_example = single_example
-        with open(f"{data_path}/{split}.pkl", "rb") as f:
-            self.data = pickle.load(f)
+        self.size = len([f for f in os.listdir(f"{self.data_path}/{self.split}")])
     
     def len(self):
-        return len(self.data)
+        return self.size
     
     def get(self, idx):
         idx_ = 0
         if self.single_example is False:
             idx_ = idx
-        node_boundary_conditions,edge_index,edge_feature,x,diode_nodes_tensor = self.data[idx_]
-        graph = pyg.data.Data(
-            x=node_boundary_conditions,  
-            edge_index=edge_index,  
-            edge_attr=edge_feature,
-            y=node_boundary_conditions,
-            diode_nodes_tensor=diode_nodes_tensor,
-            answer = x  
-        )
-        return graph
+        with open(f"{self.data_path}/{self.split}/sample_{idx_}.pkl", "rb") as f:
+            instance = pickle.load(f)
+        data = instance["data"]
+        answer = instance["answer"]
+        data.answer = data.x.clone().float()
+        data.x = data.y.clone().float()
+        data.y = data.y.float()
+        data.edge_attr = data.edge_attr.float()
+        return data
 
 def weight_file_name(path,current_epoch,supervised,single_example):
     return f"{path}/model_epoch_{current_epoch}_supervised={supervised}_single_example={single_example}.pt"
-
-
 
 if __name__ == "__main__":
     target_I = 4
@@ -162,8 +92,8 @@ if __name__ == "__main__":
                 model.load_state_dict(torch.load(weight_file_name(weight_path,current_epoch,supervised,single_example)))
             optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-            train_dataset = Dataset("../data","train",single_example=single_example)
-            val_dataset = Dataset("../data","val")
+            train_dataset = Dataset("data","train",single_example=single_example)
+            val_dataset = Dataset("data","val")
             train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
             val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate_fn)
 
