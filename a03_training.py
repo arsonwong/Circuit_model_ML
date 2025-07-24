@@ -24,9 +24,10 @@ def custom_collate_fn(data_list):
     # Manually batch diode_nodes_tensor by adding node offset per graph
     diode_nodes = []
     edge_indices = []
+    sample_indices = []
     node_offset = 0
 
-    for data in data_list:
+    for i, data in enumerate(data_list):
         a = data.diode_nodes_tensor.clone()
         find_ = torch.where(a[:,0]>=0)[0]
         a[find_,:] += node_offset
@@ -36,10 +37,13 @@ def custom_collate_fn(data_list):
         a += node_offset
         edge_indices.append(a)
 
+        sample_index = i*torch.ones(data.diode_nodes_tensor.shape[0],1,dtype=torch.long,device=data.diode_nodes_tensor.device)
+        sample_indices.append(sample_index)
         node_offset += data.num_nodes
 
     batch.diode_nodes_tensor = torch.cat(diode_nodes, dim=0)
     batch.edge_index = torch.cat(edge_indices,dim=1)
+    batch.sample_indices = torch.cat(sample_indices,dim=0)
 
     return batch
 
@@ -79,8 +83,8 @@ def weight_file_name(path,current_epoch,supervised,single_example):
 
 if __name__ == "__main__":
     cn = CircuitNetwork()
-    train_dataset = Dataset("data","train")
-    val_dataset = Dataset("data","val")
+    train_dataset = Dataset("data/nonlinear with current source","train")
+    val_dataset = Dataset("data/nonlinear with current source","val")
 
     # ==== Model, loss, optimizer ====
     model = LearnedSimulator(hidden_size=128,n_mp_layers=10).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
@@ -90,8 +94,8 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load(weight_file_name(weight_path,current_epoch,True,False)))
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     train_dataset.single_example = False
-    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, collate_fn=custom_collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=1, collate_fn=custom_collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate_fn)
 
     # ==== Training Loop ====
     for epoch in range(current_epoch,epochs):
@@ -117,15 +121,26 @@ if __name__ == "__main__":
 
                 output = model(batch)
                 answer = batch.answer
-                answer_direction = answer / torch.norm(answer)
-                if torch.norm(answer) > 0:
-                    accum_loss += torch.sum((answer_direction-output)**2) # deviation from label
-                    total_loss += torch.sum((answer_direction-output)**2) 
-                    sample_count += 1
+
+                indices = torch.where(batch.y[:,0]!=1) # not pinned voltage boundary condition
+                sample_indices_ = batch.sample_indices[indices]
+                output_ = output[indices]
+                answer_ = answer[indices]
+
+                for j in range(torch.max(sample_indices_)):
+                    find_ = torch.where(sample_indices_==j)
+                    sample_output_ = output_[find_]
+                    sample_answer_ = answer_[find_]
+                    if torch.norm(sample_output_) > 0 and torch.norm(sample_answer_) > 0:
+                        answer_direction = sample_answer_ / torch.norm(sample_answer_)
+                        output_direction = sample_output_ / torch.norm(sample_output_)
+                        accum_loss += torch.sum((answer_direction-output_direction)**2) # deviation from label
+                        total_loss += torch.sum((answer_direction-output_direction)**2) 
+                        sample_count += 1
+                        count += 1
 
                 if train_val=="train":
-                    count += 1
-                    if count==batch_size:
+                    if True: #count==batch_size:
                         accum_loss.backward()
                         optimizer.step()
                         optimizer.zero_grad()

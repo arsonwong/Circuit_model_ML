@@ -73,7 +73,7 @@ class LearnedSimulator(torch.nn.Module):
         self.embed_type = torch.nn.Embedding(3, embedding_dim)
         self.node_in = MLP(embedding_dim + 4, hidden_size, hidden_size, 3)
         self.edge_in = MLP(5, hidden_size, hidden_size, 3)
-        self.node_out = MLP(hidden_size, hidden_size, 1, 3, layernorm=True)
+        self.node_out = MLP(hidden_size, hidden_size, 1, 3)
         self.n_mp_layers = n_mp_layers
         self.layers = torch.nn.ModuleList([InteractionNetwork(
             hidden_size, 3
@@ -96,6 +96,7 @@ class LearnedSimulator(torch.nn.Module):
             node_feature, edge_feature = self.layers[i](node_feature, data.edge_index, edge_feature=edge_feature, diode_nodes=data.diode_nodes_tensor)
         # post-processing
         out = self.node_out(node_feature)
+        out = out
 
         return out
 
