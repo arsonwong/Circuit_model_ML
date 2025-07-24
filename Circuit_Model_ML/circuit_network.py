@@ -272,6 +272,10 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
     return False, x, RMS
         
 class CircuitNetwork(pyg.nn.MessagePassing):
+    def __init__(self,max_log_diode_I = None):
+        super().__init__()
+        self.max_log_diode_I = max_log_diode_I
+
     def forward(self, data, x=None):
         if x is None:
             x = data.x
@@ -288,12 +292,20 @@ class CircuitNetwork(pyg.nn.MessagePassing):
         # diode
         find_ = torch.where(diode_nodes[:,0]>=0)[0]
         diode_V_drop = (ref_x[diode_nodes[find_,1],0] - ref_x[diode_nodes[find_,0],0]).unsqueeze(1)
-    
         log_I0 = edge_feature[find_,2].unsqueeze(1)
-        I0 = -torch.sign(log_I0)*torch.exp(-torch.abs(log_I0))
+        I0 = torch.exp(-torch.abs(log_I0))
         n = edge_feature[find_,3].unsqueeze(1)
         breakdownV = edge_feature[find_,4].unsqueeze(1)
-        I[find_] -= I0*(torch.exp((diode_V_drop-breakdownV)/(n*0.02568))-1.0)
+        if self.max_log_diode_I is not None:
+            max_log_diode_I = torch.tensor(self.max_log_diode_I, device=edge_feature.device)
+            max_diode_I = torch.exp(max_log_diode_I)
+            max_V = (n*0.02568)*(max_log_diode_I + torch.abs(log_I0)) + breakdownV
+            find2_ = torch.where(diode_V_drop <= max_V)[0]
+            find3_ = torch.where(diode_V_drop > max_V)[0]
+            I[find_[find2_]] -= -torch.sign(log_I0[find2_])*I0[find2_]*(torch.exp((diode_V_drop[find2_]-breakdownV[find2_])/(n[find2_]*0.02568))-1.0)
+            I[find_[find3_]] -= -torch.sign(log_I0[find3_])*(max_diode_I + (diode_V_drop[find3_]-max_V[find3_])*max_diode_I/0.02568)
+        else:
+            I[find_] -= -torch.sign(log_I0)*I0*(torch.exp((diode_V_drop-breakdownV)/(n*0.02568))-1.0)
         return I
     
     def aggregate(self, inputs, index, dim_size=None, y=None):
