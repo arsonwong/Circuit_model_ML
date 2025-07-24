@@ -1,3 +1,10 @@
+# next ideas:
+# distinguish between cold start and non cold start
+# starting point isn't zero, but rather the average of all boundary nodes
+# detect whether diode has turned on, or has diode
+# problem: training set doesn't have overshoots of diodes because that is suppressed
+# soln: in rollout we also have the same limits
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -64,11 +71,13 @@ class Dataset(pyg.data.Dataset):
                 instance = pickle.load(f)
             data = instance["data"]
             answer = instance["answer"]
-            if "x_init_record" in instance:
-                data.x_init_record = instance["x_init_record"].clone().float()
-                data.delta_x_init_record = instance["delta_x_init_record"].clone().float()
+            if "x_record" in instance:
+                data.x_record = instance["x_record"].clone().float()
+                data.delta_x_record = instance["delta_x_record"].clone().float()
+                data.RMS_record = torch.tensor(instance["RMS_record"]).float()
             data.answer = answer.clone().float()
-            data.x = torch.zeros(data.y.shape[0],1,dtype=torch.float) #data.y.clone() #.float()
+            data.x = data.x_record.clone()
+            # data.x = torch.zeros(data.y.shape[0],1,dtype=torch.float) #data.y.clone() #.float()
             data.y = data.y.float()
             data.edge_attr = data.edge_attr.float()
             self.data_set.append(data)
@@ -124,7 +133,7 @@ if __name__ == "__main__":
                 batch = batch.to(device)
 
                 output, _ = model(batch)
-                answer = batch.answer
+                answer = batch.answer - batch.x_record # final answer - initial guess
 
                 indices = torch.where(batch.y[:,0]!=1) # not pinned voltage boundary condition
                 sample_indices_ = batch.sample_indices[indices]

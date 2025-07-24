@@ -230,6 +230,7 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
     indices = torch.where(data.y[:,0]==1) # pinned voltage boundary condition
     data.x[indices[0],0] = data.y[indices[0],1]
     node_error = cn.forward(data)
+    RMS = torch.sqrt(torch.mean(node_error**2)).item()
     x = data.x
     record = []
     for _ in range(50):
@@ -248,7 +249,7 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
                 print(f"Linear solver error: {e}")
             return False, None, None, None
         delta_x[rows] = X
-        record.append({"x": x.clone().detach(), "delta_x": delta_x.clone().detach()})
+        record.append({"x": x.clone().detach(), "delta_x": delta_x.clone().detach(), "RMS": RMS})
         ratio = 1.0
         if diode_edges.shape[0] > 0:
             delta_diode_V = delta_x[diode_edges[:,1]]-delta_x[diode_edges[:,0]]
