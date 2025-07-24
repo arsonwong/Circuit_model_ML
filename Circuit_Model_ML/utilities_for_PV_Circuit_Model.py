@@ -136,7 +136,7 @@ def solve_example_tandem_cell():
     node_error = cn.forward(data)
     print(node_error)
 
-    _, x, RMS = solve_circuit(data,diode_V_pos_delta_limit=0.2,diode_V_hard_limit=1.5, convergence_RMS=1e-100)
+    _, x, RMS, _ = solve_circuit(data,diode_V_pos_delta_limit=0.2,diode_V_hard_limit=1.5, convergence_RMS=1e-100)
 
     print(x)
     print(RMS)

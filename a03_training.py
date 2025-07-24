@@ -10,12 +10,13 @@ from Circuit_Model_ML.circuit_network_ML import *
 from Circuit_Model_ML.circuit_network import *
 import os
 
-# ==== Hyperparameters ====
 epochs = 100
 current_epoch = -1
 batch_size = 256
 learning_rate = 1e-6
 weight_path = "weights/"
+hidden_size=128
+n_mp_layers=10
 
 def custom_collate_fn(data_list):
     # Standard PyG batching (handles x, edge_index, edge_attr, y, etc.)
@@ -63,6 +64,9 @@ class Dataset(pyg.data.Dataset):
                 instance = pickle.load(f)
             data = instance["data"]
             answer = instance["answer"]
+            if "x_init_record" in instance:
+                data.x_init_record = instance["x_init_record"].clone().float()
+                data.delta_x_init_record = instance["delta_x_init_record"].clone().float()
             data.answer = answer.clone().float()
             data.x = torch.zeros(data.y.shape[0],1,dtype=torch.float) #data.y.clone() #.float()
             data.y = data.y.float()
@@ -87,7 +91,7 @@ if __name__ == "__main__":
     val_dataset = Dataset("data/nonlinear with current source","val")
 
     # ==== Model, loss, optimizer ====
-    model = LearnedSimulator(hidden_size=128,n_mp_layers=10).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    model = LearnedSimulator(hidden_size=hidden_size,n_mp_layers=n_mp_layers).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total trainable parameters: {total_params}")
     if current_epoch >= 0:
@@ -119,7 +123,7 @@ if __name__ == "__main__":
             for batch in progress_bar:
                 batch = batch.to(device)
 
-                output = model(batch)
+                output, _ = model(batch)
                 answer = batch.answer
 
                 indices = torch.where(batch.y[:,0]!=1) # not pinned voltage boundary condition

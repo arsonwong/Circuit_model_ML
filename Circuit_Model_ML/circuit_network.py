@@ -163,10 +163,10 @@ class GridCircuit():
         return data
     def solve(self, convergence_RMS=1e-8, suppress_warning=False):
         data = self.export()
-        success, x, RMS = solve_circuit(data, convergence_RMS=convergence_RMS, suppress_warning=suppress_warning)
+        success, x, RMS, record = solve_circuit(data, convergence_RMS=convergence_RMS, suppress_warning=suppress_warning)
         if x is not None:
             self.voltages = x
-        return success, RMS
+        return success, RMS, record
     def draw(self):
         if hasattr(self,"node_cols"):
             _, ax = plt.subplots()
@@ -231,6 +231,7 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
     data.x[indices[0],0] = data.y[indices[0],1]
     node_error = cn.forward(data)
     x = data.x
+    record = []
     for _ in range(50):
         J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, 
                                                                         edge_index=data.edge_index, 
@@ -245,8 +246,9 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
         except Exception as e:
             if not suppress_warning:
                 print(f"Linear solver error: {e}")
-            return False, None, None
+            return False, None, None, None
         delta_x[rows] = X
+        record.append({"x": x.clone().detach(), "delta_x": delta_x.clone().detach()})
         ratio = 1.0
         if diode_edges.shape[0] > 0:
             delta_diode_V = delta_x[diode_edges[:,1]]-delta_x[diode_edges[:,0]]
@@ -266,10 +268,10 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
         if RMS < convergence_RMS:
             break
     if RMS < convergence_RMS:
-        return True, x, RMS
+        return True, x, RMS, record
     if not suppress_warning:
         print("Non convergence: RMS = ", RMS)
-    return False, x, RMS
+    return False, x, RMS, record
         
 class CircuitNetwork(pyg.nn.MessagePassing):
     def __init__(self,max_log_diode_I = None):

@@ -96,7 +96,6 @@ class LearnedSimulator(torch.nn.Module):
             node_feature, edge_feature = self.layers[i](node_feature, data.edge_index, edge_feature=edge_feature, diode_nodes=data.diode_nodes_tensor)
         # post-processing
         out = self.node_out(node_feature)
-        out = out
 
-        return out
+        return out, node_error
 
