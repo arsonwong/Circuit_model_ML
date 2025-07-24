@@ -60,7 +60,7 @@ class Dataset(pyg.data.Dataset):
             data = instance["data"]
             answer = instance["answer"]
             data.answer = answer.clone().float()
-            data.x = data.y.clone().float()
+            data.x = torch.zeros(data.y.shape[0],1,dtype=torch.float) #data.y.clone() #.float()
             data.y = data.y.float()
             data.edge_attr = data.edge_attr.float()
             self.data_set.append(data)
@@ -81,97 +81,62 @@ if __name__ == "__main__":
     cn = CircuitNetwork()
     train_dataset = Dataset("data","train")
     val_dataset = Dataset("data","val")
-    for supervised in [True,False]:
-        for single_example in [False,True]:
-            # ==== Model, loss, optimizer ====
-            # model = LearnedSimulator(hidden_size=128,n_mp_layers=10).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-            model = LearnedSimulator(hidden_size=32,n_mp_layers=20).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-            total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            print(f"Total trainable parameters: {total_params}")
-            if current_epoch >= 0:
-                model.load_state_dict(torch.load(weight_file_name(weight_path,current_epoch,supervised,single_example)))
-            optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-            train_dataset.single_example = single_example
-            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
-            val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate_fn)
 
-            # ==== Training Loop ====
-            for epoch in range(current_epoch,epochs):
-                for train_val in ["train","val"]:
-                    node_count = 0
-                    total_loss = np.zeros(4,)
-                    if train_val=="train":
-                        model.train()
-                        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
-                    else:
-                        model.eval()
-                        progress_bar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs}")
+    # ==== Model, loss, optimizer ====
+    model = LearnedSimulator(hidden_size=128,n_mp_layers=10).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total trainable parameters: {total_params}")
+    if current_epoch >= 0:
+        model.load_state_dict(torch.load(weight_file_name(weight_path,current_epoch,True,False)))
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    train_dataset.single_example = False
+    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, collate_fn=custom_collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=1, collate_fn=custom_collate_fn)
 
-                    torch.set_grad_enabled(True)
-                    for batch in progress_bar:
-                        batch = batch.to(device)
+    # ==== Training Loop ====
+    for epoch in range(current_epoch,epochs):
+        for train_val in ["train","val"]:
+            if train_val=="train":
+                model.train()
+                progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
+            else:
+                model.eval()
+                progress_bar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs}")
 
-                        if train_val=="train":
-                            optimizer.zero_grad()
-                        else:
-                            torch.set_grad_enabled(False)
+            torch.set_grad_enabled(True)
+            if train_val=="train":
+                optimizer.zero_grad()
+            else:
+                torch.set_grad_enabled(False)
+            count = 0
+            accum_loss = 0
+            total_loss = 0
+            sample_count = 0
+            for batch in progress_bar:
+                batch = batch.to(device)
 
-                        output,node_error = model(batch)
-                        answer = batch.answer
+                output = model(batch)
+                answer = batch.answer
+                answer_direction = answer / torch.norm(answer)
+                if torch.norm(answer) > 0:
+                    accum_loss += torch.sum((answer_direction-output)**2) # deviation from label
+                    total_loss += torch.sum((answer_direction-output)**2) 
+                    sample_count += 1
 
-                        if node_error.dim() == 2 and node_error.shape[1] == 1:
-                            node_error = node_error.squeeze(1)
-                        # loss1 = torch.sum(node_error**2) # continuity
-                        find_ = torch.where(batch.x[:,0]==1)[0] # voltage pinned nodes
-                        loss1 = torch.sum(node_error**2) + torch.sum((answer[find_]-output[find_])**2) # continuity + pinned voltage closeness
-                        loss2 = torch.sum((answer-output)**2) # deviation from label
+                if train_val=="train":
+                    count += 1
+                    if count==batch_size:
+                        accum_loss.backward()
+                        optimizer.step()
+                        optimizer.zero_grad()
+                        count = 0
+                        accum_loss = 0
 
-                        if train_val=="train":
-                            if supervised:
-                                loss2.backward()
-                            else:
-                                loss1.backward()
-                            optimizer.step()
+                progress_bar.set_description(f"Epoch {epoch+1}/{epochs}, loss = {total_loss.item()/sample_count:.3e}")
 
-                        data = pyg.data.Data(
-                            x=batch.answer,  
-                            edge_index=batch.edge_index,  
-                            edge_attr=batch.edge_attr,
-                            diode_nodes_tensor=batch.diode_nodes_tensor, 
-                            y=batch.y
-                        )
-                        node_error = cn.forward(data)
-                        print(batch.answer)
-                        print(output)
-                        print(node_error)
-                        assert(1==0)
-
-                        if node_error.dim() == 2 and node_error.shape[1] == 1:
-                            node_error = node_error.squeeze(1)
-                        loss3 = torch.sum(node_error**2) # continuity from the answer
-
-                        data = pyg.data.Data(
-                            x=output,  
-                            edge_index=batch.edge_index,  
-                            edge_attr=batch.edge_attr, 
-                            y=batch.y,
-                            diode_nodes_tensor=batch.diode_nodes_tensor
-                        )
-                        node_error = cn.forward(data)
-                        if node_error.dim() == 2 and node_error.shape[1] == 1:
-                            node_error = node_error.squeeze(1)
-                        loss4 = torch.sum(node_error**2) # continuity from this output, should be identical to loss1
-                        node_count += node_error.numel()
-
-                        total_loss[0] += loss1.item()
-                        total_loss[1] += loss2.item()
-                        total_loss[2] += loss3.item()
-                        total_loss[3] += loss4.item()
-                        progress_bar.set_description(f"Epoch {epoch+1}/{epochs}, loss = {loss2.item()/node_error.numel():.3e}")
-
-                    avg_loss = total_loss / node_count
-                    print(f"[Epoch {epoch+1}] Loss: {avg_loss[1]:.4e}")
-                    with open(f"loss_log_supervised={supervised}_single_example={single_example}.txt", "a") as f:
-                        f.write(f"Epoch {epoch+1} | {train_val} | Losses: {avg_loss.tolist()}\n")
-                os.makedirs(weight_path, exist_ok=True)
-                torch.save(model.state_dict(), weight_file_name(weight_path,epoch+1,supervised,single_example))
+            avg_loss = total_loss.item() / sample_count
+            print(f"[Epoch {epoch+1}] Loss: {avg_loss:.4e}")
+            with open(f"loss_log.txt", "a") as f:
+                f.write(f"Epoch {epoch+1} | {train_val} | Loss: {avg_loss}\n")
+        os.makedirs(weight_path, exist_ok=True)
+        torch.save(model.state_dict(), weight_file_name(weight_path,epoch+1,True,False))

@@ -59,24 +59,26 @@ class InteractionNetwork(pyg.nn.MessagePassing):
     def aggregate(self, inputs, index, dim_size=None):
         out = torch_scatter.scatter(inputs, index, dim=self.node_dim, dim_size=dim_size, reduce="sum")
         return (inputs, out)
-    
+
+# nodes: put in guess voltage, net I as well
+# guess the direction, so layer norm can be True    
 class LearnedSimulator(torch.nn.Module):
     def __init__(
         self,
-        hidden_size=32,
+        hidden_size=64,
         n_mp_layers=4, # number of GNN layers
         embedding_dim=8
     ):
         super().__init__()
         self.embed_type = torch.nn.Embedding(3, embedding_dim)
-        self.node_in = MLP(embedding_dim + 2, hidden_size, hidden_size, 3)
+        self.node_in = MLP(embedding_dim + 4, hidden_size, hidden_size, 3)
         self.edge_in = MLP(5, hidden_size, hidden_size, 3)
-        self.node_out = MLP(hidden_size, hidden_size, 1, 3, layernorm=False)
+        self.node_out = MLP(hidden_size, hidden_size, 1, 3, layernorm=True)
         self.n_mp_layers = n_mp_layers
         self.layers = torch.nn.ModuleList([InteractionNetwork(
             hidden_size, 3
         ) for _ in range(n_mp_layers)])
-        self.cn = CircuitNetwork()
+        self.cn = CircuitNetwork(max_log_diode_I = 4)
 
         self.reset_parameters()
 
@@ -84,9 +86,9 @@ class LearnedSimulator(torch.nn.Module):
         torch.nn.init.xavier_uniform_(self.embed_type.weight)
 
     def forward(self, data: pyg.data.Data, modifiers = None):
-        # pre-processing
-        # node feature: combine categorial feature data.x and contiguous feature data.pos.
-        node_feature = torch.cat((self.embed_type(data.x[:,0].long()), data.x[:,1:]), dim=-1)
+        node_error = self.cn.forward(data)
+
+        node_feature = torch.cat((self.embed_type(data.y[:,0].long()), data.y[:,1:], data.x, node_error), dim=-1)
         node_feature = self.node_in(node_feature)
         edge_feature = self.edge_in(data.edge_attr)
         # stack of GNN layers
@@ -95,9 +97,5 @@ class LearnedSimulator(torch.nn.Module):
         # post-processing
         out = self.node_out(node_feature)
 
-        # indices = torch.where(data.x[:,0]==1)[0] # pinned voltage boundary condition
-        # out[indices,0] = data.x[indices,1].float()
-        node_error = self.cn.forward(data, out)
-
-        return out, node_error
+        return out
 
