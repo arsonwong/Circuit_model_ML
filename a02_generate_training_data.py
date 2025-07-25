@@ -4,24 +4,67 @@ import pickle
 import os
 import torch
 import random
+import numpy as np
 
-folder = "data/nonlinear with current source"
-data_num = {"train": 100000, "val": 10000}
+def generate_data(zeroth_iteration = True, is_linear=False, has_current_source=True):
+    if is_linear:
+        if has_current_source:
+            folder = "data/linear with current source" 
+        else:
+            folder = "data/linear with no current source"
+    else: 
+        if has_current_source:
+            folder = "data/nonlinear with current source" 
+        else:
+            folder = "data/nonlinear with no current source"
+    if zeroth_iteration:
+        folder += " zeroth iteration"
 
-for iter in ["train","val"]:
-    filepath = folder+"/"+iter
-    os.makedirs(filepath, exist_ok=True)
-    pbar = tqdm(total=data_num[iter],desc="Generating " + iter + " data")
-    while pbar.n < data_num[iter]:
-        grid_circuit = GridCircuit(rows=4,cols=4,is_linear=False,has_current_source=True) # makes a random grid circuit each time
-        data = grid_circuit.export()
-        success, _, record = grid_circuit.solve(convergence_RMS=1e-8,suppress_warning=True)
-        if success:
-            variance = torch.var(grid_circuit.voltages)
-            if variance > 0:
-                filename = f"sample_{pbar.n}.pkl"
-                with open(os.path.join(filepath,filename), "wb") as f:
-                    random_iteration = random.choice(record)
-                    output = {"data": data, "answer": grid_circuit.voltages, "RMS_record": random_iteration["RMS"], "x_record": torch.tensor(random_iteration["x"]), "delta_x_record": torch.tensor(random_iteration["delta_x"])}
-                    pickle.dump(output, f)
-                pbar.update(1)
+    data_num = {"train": 100000, "val": 10000}
+
+    for iter in ["train","val"]:
+        filepath = folder+"/"+iter
+        os.makedirs(filepath, exist_ok=True)
+        pbar = tqdm(total=data_num[iter],desc="Generating " + iter + " data")
+        outputs = []
+        while pbar.n < data_num[iter]:
+            grid_circuit = GridCircuit(rows=4,cols=4,is_linear=is_linear,has_current_source=has_current_source) # makes a random grid circuit each time
+            find_ = np.where(grid_circuit.edge_type==1)[0] # looks for current source
+            actually_has_current_source = len(find_)>0
+            # encourages more circuits with current source
+            if has_current_source and (not actually_has_current_source) and np.random.rand()<0.7:
+                continue
+            find_ = np.where(grid_circuit.edge_type==2)[0] # looks for diodes
+            actually_has_diode = len(find_)>0
+            # encourages more circuits with diodes
+            if (not is_linear) and (not actually_has_diode) and np.random.rand()<0.7:
+                continue
+            data = grid_circuit.export()
+            success, aux = grid_circuit.solve(convergence_RMS=1e-8,suppress_warning=True)
+            if success:
+                variance = torch.var(grid_circuit.voltages)
+                if variance > 0:
+                    filename = f"sample_{pbar.n}.pkl"
+                    diode_turned_on = aux["diode_turned_on"]
+                    record = aux["record"]  
+                    if zeroth_iteration:
+                        random_iteration = record[0]         
+                    else:
+                        random_iteration = random.choice(record)
+                    outputs.append({"data": data, 
+                                "answer": grid_circuit.voltages, 
+                                "RMS_record": random_iteration["RMS"], 
+                                "x_record": torch.tensor(random_iteration["x"]), 
+                                "delta_x_record": torch.tensor(random_iteration["delta_x"]),
+                                "diode_turned_on": diode_turned_on,
+                                "actually_has_current_source": actually_has_current_source,
+                                "actually_has_diode": actually_has_diode
+                                })
+                    if len(outputs)==100:
+                        with open(os.path.join(filepath,filename), "wb") as f:
+                            pickle.dump(outputs, f)
+                        outputs = []
+                    pbar.update(1)
+
+if __name__ == "__main__":
+    generate_data()

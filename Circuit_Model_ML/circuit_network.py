@@ -163,10 +163,10 @@ class GridCircuit():
         return data
     def solve(self, convergence_RMS=1e-8, suppress_warning=False):
         data = self.export()
-        success, x, RMS, record = solve_circuit(data, convergence_RMS=convergence_RMS, suppress_warning=suppress_warning)
+        success, x, aux = solve_circuit(data, convergence_RMS=convergence_RMS, suppress_warning=suppress_warning)
         if x is not None:
             self.voltages = x
-        return success, RMS, record
+        return success, aux
     def draw(self):
         if hasattr(self,"node_cols"):
             _, ax = plt.subplots()
@@ -233,6 +233,7 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
     RMS = torch.sqrt(torch.mean(node_error**2)).item()
     x = data.x
     record = []
+    diode_turned_on = False
     for _ in range(50):
         J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, 
                                                                         edge_index=data.edge_index, 
@@ -247,7 +248,7 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
         except Exception as e:
             if not suppress_warning:
                 print(f"Linear solver error: {e}")
-            return False, None, None, None
+            return False, None, None
         delta_x[rows] = X
         record.append({"x": x.clone().detach(), "delta_x": delta_x.clone().detach(), "RMS": RMS})
         ratio = 1.0
@@ -260,6 +261,7 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
             if max_diode_V_pos_delta > diode_V_pos_delta_limit:
                 ratio = diode_V_pos_delta_limit/max_diode_V_pos_delta
             if new_diode_V[max_diode_V_index] > diode_V_hard_limit:
+                diode_turned_on = True
                 ratio = min(ratio,(diode_V_hard_limit-old_diode_V[max_diode_V_index])/delta_diode_V[max_diode_V_index])
         x = x + delta_x*ratio
         data.x = x
@@ -268,11 +270,12 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
         RMS = torch.sqrt(torch.mean(node_error**2)).item()
         if RMS < convergence_RMS:
             break
+    aux = {'RMS': RMS, 'record': record, 'diode_turned_on': diode_turned_on}
     if RMS < convergence_RMS:
-        return True, x, RMS, record
+        return True, x, aux
     if not suppress_warning:
         print("Non convergence: RMS = ", RMS)
-    return False, x, RMS, record
+    return False, x, aux
         
 class CircuitNetwork(pyg.nn.MessagePassing):
     def __init__(self,max_log_diode_I = None):

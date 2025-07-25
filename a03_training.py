@@ -16,14 +16,15 @@ import torch_geometric as pyg
 from Circuit_Model_ML.circuit_network_ML import *
 from Circuit_Model_ML.circuit_network import *
 import os
+import re
+from datetime import datetime
+import json
+from a02_generate_training_data import generate_data
 
 epochs = 100
 current_epoch = -1
 batch_size = 256
-learning_rate = 1e-6
-weight_path = "weights/"
-hidden_size=128
-n_mp_layers=10
+learning_rate = 1e-4
 
 def custom_collate_fn(data_list):
     # Standard PyG batching (handles x, edge_index, edge_attr, y, etc.)
@@ -61,26 +62,27 @@ class Dataset(pyg.data.Dataset):
         self.data_path = data_path
         self.split = split
         self.single_example = single_example
-        max_size = len([f for f in os.listdir(f"{self.data_path}/{self.split}")])
+        max_size = max([int(m.group(1)) for m in (re.match(r"sample_(\d+)\.pkl", f) for f in os.listdir(os.path.join(self.data_path, self.split))) if m] or [-1])+1
         self.data_set = []
         for i in tqdm(range(max_size), desc=f"Loading {split} dataset"):
             file_path = f"{self.data_path}/{self.split}/sample_{i}.pkl"
             if not os.path.exists(file_path):
-                break
+                continue
             with open(f"{self.data_path}/{self.split}/sample_{i}.pkl", "rb") as f:
-                instance = pickle.load(f)
-            data = instance["data"]
-            answer = instance["answer"]
-            if "x_record" in instance:
-                data.x_record = instance["x_record"].clone().float()
-                data.delta_x_record = instance["delta_x_record"].clone().float()
-                data.RMS_record = torch.tensor(instance["RMS_record"]).float()
-            data.answer = answer.clone().float()
-            data.x = data.x_record.clone()
-            # data.x = torch.zeros(data.y.shape[0],1,dtype=torch.float) #data.y.clone() #.float()
-            data.y = data.y.float()
-            data.edge_attr = data.edge_attr.float()
-            self.data_set.append(data)
+                package = pickle.load(f)
+            for instance in package:
+                data = instance["data"]
+                answer = instance["answer"]
+                if "x_record" in instance:
+                    data.x_record = instance["x_record"].clone().float()
+                    data.delta_x_record = instance["delta_x_record"].clone().float()
+                    data.RMS_record = torch.tensor(instance["RMS_record"]).float()
+                data.answer = answer.clone().float()
+                data.x = data.x_record.clone()
+                # data.x = torch.zeros(data.y.shape[0],1,dtype=torch.float) #data.y.clone() #.float()
+                data.y = data.y.float()
+                data.edge_attr = data.edge_attr.float()
+                self.data_set.append(data)
 
     def len(self):
         return len(self.data_set)
@@ -94,10 +96,31 @@ class Dataset(pyg.data.Dataset):
 def weight_file_name(path,current_epoch,supervised,single_example):
     return f"{path}/model_epoch_{current_epoch}_supervised={supervised}_single_example={single_example}.pt"
 
-if __name__ == "__main__":
+def train(zeroth_iteration = True, is_linear=False, has_current_source=True, hidden_size=128, n_mp_layers=10):
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    weight_path = "weights/" + timestamp
+    os.makedirs(weight_path, exist_ok=True)
+    json_ = {"zeroth_iteration": zeroth_iteration, "is_linear": is_linear, "has_current_source": has_current_source, "hidden_size": hidden_size, "n_mp_layers": n_mp_layers}
+    json_path = os.path.join(weight_path, "parameters.json")
+    with open(json_path, "w") as f:
+        json.dump(json_, f, indent=4)
+
+    if is_linear:
+        if has_current_source:
+            folder = "data/linear with current source" 
+        else:
+            folder = "data/linear with no current source"
+    else: 
+        if has_current_source:
+            folder = "data/nonlinear with current source" 
+        else:
+            folder = "data/nonlinear with no current source"
+    if zeroth_iteration:
+        folder += " zeroth iteration"
+
     cn = CircuitNetwork()
-    train_dataset = Dataset("data/nonlinear with current source","train")
-    val_dataset = Dataset("data/nonlinear with current source","val")
+    train_dataset = Dataset(folder,"train")
+    val_dataset = Dataset(folder,"val")
 
     # ==== Model, loss, optimizer ====
     model = LearnedSimulator(hidden_size=hidden_size,n_mp_layers=n_mp_layers).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
@@ -111,6 +134,7 @@ if __name__ == "__main__":
     val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate_fn)
 
     # ==== Training Loop ====
+    val_loss_history = []
     for epoch in range(current_epoch,epochs):
         for train_val in ["train","val"]:
             if train_val=="train":
@@ -163,8 +187,23 @@ if __name__ == "__main__":
                 progress_bar.set_description(f"Epoch {epoch+1}/{epochs}, loss = {total_loss.item()/sample_count:.3e}")
 
             avg_loss = total_loss.item() / sample_count
+            if train_val == "val":
+                val_loss_history.append(avg_loss)
             print(f"[Epoch {epoch+1}] Loss: {avg_loss:.4e}")
-            with open(f"loss_log.txt", "a") as f:
+            with open(os.path.join(weight_path,"loss_log.txt"), "a") as f:
                 f.write(f"Epoch {epoch+1} | {train_val} | Loss: {avg_loss}\n")
-        os.makedirs(weight_path, exist_ok=True)
-        torch.save(model.state_dict(), weight_file_name(weight_path,epoch+1,True,False))
+        torch.save(model.state_dict(), os.path.join(weight_path,f"weight_{epoch+1}.pt"))
+        val_loss_history_ = np.array(val_loss_history)
+        if val_loss_history_.size > 6:
+            part_min_ = np.min(val_loss_history[:-4])
+            all_min_ = np.min(val_loss_history)
+            if all_min_ > part_min_*0.99:
+                break
+
+if __name__ == "__main__":
+    for zeroth_iteration in [True, False]:
+        if zeroth_iteration:
+            generate_data(zeroth_iteration = True)
+        for hidden_size in [128,32,64]:
+            for n_mp_layers in [10, 5, 20]:
+                train(zeroth_iteration=zeroth_iteration, hidden_size=hidden_size, n_mp_layers=n_mp_layers)
