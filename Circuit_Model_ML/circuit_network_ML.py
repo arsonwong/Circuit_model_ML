@@ -34,10 +34,10 @@ class MLP(torch.nn.Module):
         return x
     
 class InteractionNetwork(pyg.nn.MessagePassing):
-    def __init__(self, hidden_size, layers):
+    def __init__(self, hidden_size, layers, layernorm):
         super().__init__()
-        self.lin_edge = MLP(hidden_size * 3, hidden_size, hidden_size, layers)
-        self.lin_node = MLP(hidden_size * 2, hidden_size, hidden_size, layers)
+        self.lin_edge = MLP(hidden_size * 3, hidden_size, hidden_size, layers, layernorm=layernorm)
+        self.lin_node = MLP(hidden_size * 2, hidden_size, hidden_size, layers, layernorm=layernorm)
 
     def forward(self, x, edge_index, edge_feature, diode_nodes):
         edge_out, aggr = self.propagate(edge_index, x=(x, x), edge_feature=edge_feature, diode_nodes=diode_nodes, ref_x=x)
@@ -67,16 +67,17 @@ class LearnedSimulator(torch.nn.Module):
         self,
         hidden_size=64,
         n_mp_layers=4, # number of GNN layers
-        embedding_dim=8
+        embedding_dim=8,
+        layernorm=True
     ):
         super().__init__()
         self.embed_type = torch.nn.Embedding(3, embedding_dim)
-        self.node_in = MLP(embedding_dim + 4, hidden_size, hidden_size, 3)
-        self.edge_in = MLP(5, hidden_size, hidden_size, 3)
-        self.node_out = MLP(hidden_size, hidden_size, 1, 3)
+        self.node_in = MLP(embedding_dim + 4, hidden_size, hidden_size, 3, layernorm=layernorm)
+        self.edge_in = MLP(5, hidden_size, hidden_size, 3, layernorm=layernorm)
+        self.node_out = MLP(hidden_size, hidden_size, 1, 3, layernorm=False)
         self.n_mp_layers = n_mp_layers
         self.layers = torch.nn.ModuleList([InteractionNetwork(
-            hidden_size, 3
+            hidden_size, 3, layernorm=layernorm
         ) for _ in range(n_mp_layers)])
         self.cn = CircuitNetwork(max_log_diode_I = 4)
 

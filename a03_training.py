@@ -46,7 +46,7 @@ def custom_collate_fn(data_list):
         a += node_offset
         edge_indices.append(a)
 
-        sample_index = i*torch.ones(data.diode_nodes_tensor.shape[0],1,dtype=torch.long,device=data.diode_nodes_tensor.device)
+        sample_index = i*torch.ones(data.num_nodes,1,dtype=torch.long,device=data.diode_nodes_tensor.device)
         sample_indices.append(sample_index)
         node_offset += data.num_nodes
 
@@ -96,14 +96,28 @@ class Dataset(pyg.data.Dataset):
 def weight_file_name(path,current_epoch,supervised,single_example):
     return f"{path}/model_epoch_{current_epoch}_supervised={supervised}_single_example={single_example}.pt"
 
-def train(zeroth_iteration = True, is_linear=False, has_current_source=True, hidden_size=128, n_mp_layers=10):
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    weight_path = "weights/" + timestamp
-    os.makedirs(weight_path, exist_ok=True)
-    json_ = {"zeroth_iteration": zeroth_iteration, "is_linear": is_linear, "has_current_source": has_current_source, "hidden_size": hidden_size, "n_mp_layers": n_mp_layers}
-    json_path = os.path.join(weight_path, "parameters.json")
-    with open(json_path, "w") as f:
-        json.dump(json_, f, indent=4)
+def prep_train_or_ver(zeroth_iteration = True, is_linear=False, has_current_source=True, 
+                 hidden_size=128, n_mp_layers=10, layernorm=True, train_magnitude=False, 
+                 split_dir_and_mag_losses=False, starting_point=None):
+    if starting_point is None:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        weight_path = "weights/" + timestamp
+        os.makedirs(weight_path, exist_ok=True)
+        json_ = {
+        "zeroth_iteration": zeroth_iteration, 
+        "is_linear": is_linear, 
+        "has_current_source": has_current_source, 
+        "hidden_size": hidden_size, 
+        "n_mp_layers": n_mp_layers,
+        "layernorm": layernorm, 
+        "train_magnitude": train_magnitude,
+        "split_dir_and_mag_losses": split_dir_and_mag_losses
+        }
+        json_path = os.path.join(weight_path, "parameters.json")
+        with open(json_path, "w") as f:
+            json.dump(json_, f, indent=4)
+    else:
+        weight_path = starting_point["start_weight_path"]
 
     if is_linear:
         if has_current_source:
@@ -118,24 +132,32 @@ def train(zeroth_iteration = True, is_linear=False, has_current_source=True, hid
     if zeroth_iteration:
         folder += " zeroth iteration"
 
-    cn = CircuitNetwork()
+    # ==== Model, loss, optimizer ====
+    model = LearnedSimulator(hidden_size=hidden_size,n_mp_layers=n_mp_layers).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    if starting_point is not None:
+        model.load_state_dict(torch.load(starting_point["start_weight_filename"]))
+        optimizer.load_state_dict(torch.load(os.path.join(weight_path, "optimizer.pth")))
+
+    return model, optimizer, folder
+
+def train(model, optimizer, folder):
     train_dataset = Dataset(folder,"train")
     val_dataset = Dataset(folder,"val")
 
-    # ==== Model, loss, optimizer ====
-    model = LearnedSimulator(hidden_size=hidden_size,n_mp_layers=n_mp_layers).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total trainable parameters: {total_params}")
-    if current_epoch >= 0:
-        model.load_state_dict(torch.load(weight_file_name(weight_path,current_epoch,True,False)))
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     train_dataset.single_example = False
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate_fn)
 
+    device = next(model.parameters()).device
+
     # ==== Training Loop ====
     val_loss_history = []
-    for epoch in range(current_epoch,epochs):
+    train_loss_history = []
+    start_epoch = 0
+    if starting_point is not None:
+        start_epoch = starting_point["start_epoch"]
+    for epoch in range(start_epoch,epochs):
         for train_val in ["train","val"]:
             if train_val=="train":
                 model.train()
@@ -169,10 +191,19 @@ def train(zeroth_iteration = True, is_linear=False, has_current_source=True, hid
                     sample_output_ = output_[find_]
                     sample_answer_ = answer_[find_]
                     if torch.norm(sample_output_) > 0 and torch.norm(sample_answer_) > 0:
-                        answer_direction = sample_answer_ / torch.norm(sample_answer_)
-                        output_direction = sample_output_ / torch.norm(sample_output_)
-                        accum_loss += torch.sum((answer_direction-output_direction)**2) # deviation from label
-                        total_loss += torch.sum((answer_direction-output_direction)**2) 
+                        answer_mag = torch.norm(sample_answer_)
+                        output_mag = torch.norm(sample_output_)
+                        answer_direction = sample_answer_ / answer_mag
+                        output_direction = sample_output_ / output_mag
+                        if train_magnitude:
+                            if split_dir_and_mag_losses:
+                                this_loss = torch.sum((sample_answer_-sample_output_)**2) # deviation from label
+                            else:
+                                this_loss = torch.sum((answer_direction-output_direction)**2) + (torch.log(answer_mag/output_mag))**2 # deviation from label
+                        else:
+                            this_loss = torch.sum((answer_direction-output_direction)**2) # deviation from label
+                        accum_loss += this_loss
+                        total_loss += this_loss
                         sample_count += 1
                         count += 1
 
@@ -189,10 +220,14 @@ def train(zeroth_iteration = True, is_linear=False, has_current_source=True, hid
             avg_loss = total_loss.item() / sample_count
             if train_val == "val":
                 val_loss_history.append(avg_loss)
-            print(f"[Epoch {epoch+1}] Loss: {avg_loss:.4e}")
-            with open(os.path.join(weight_path,"loss_log.txt"), "a") as f:
-                f.write(f"Epoch {epoch+1} | {train_val} | Loss: {avg_loss}\n")
+            else:
+                train_loss_history.append(avg_loss)
+        print(f"[Epoch {epoch+1}] Train Loss: {train_loss_history[-1]:.4e}, Val Loss: {val_loss_history[-1]:.4e}")
+        with open(os.path.join(weight_path,"loss_log.txt"), "a") as f:
+            f.write(f"[Epoch {epoch+1}] Train Loss: {train_loss_history[-1]:.4e}, Val Loss: {val_loss_history[-1]:.4e}\n")
         torch.save(model.state_dict(), os.path.join(weight_path,f"weight_{epoch+1}.pt"))
+        torch.save(optimizer.state_dict(),  os.path.join(weight_path,f"optimizer.pth"))
+        
         val_loss_history_ = np.array(val_loss_history)
         if val_loss_history_.size > 6:
             part_min_ = np.min(val_loss_history[:-4])
@@ -200,10 +235,93 @@ def train(zeroth_iteration = True, is_linear=False, has_current_source=True, hid
             if all_min_ > part_min_*0.99:
                 break
 
+    # === Keep only last 6 weights (by epoch number) ===
+    weight_files = [f for f in os.listdir(weight_path) if f.startswith("weight_") and f.endswith(".pt")]
+    # Extract the number from weight_{number}.pt and sort numerically
+    weight_files = sorted(weight_files, key=lambda x: int(x.split("_")[1].split(".")[0]))
+    if len(weight_files) > 6:
+        for old_file in weight_files[:-6]:
+            os.remove(os.path.join(weight_path, old_file))
+
 if __name__ == "__main__":
+    historical_runs_timestamp_start = "2025-07-26_15-13-15"  # set to None if ignore historical runs
+    params = []
+    val_losses = []
+    weight_paths = []
+    if historical_runs_timestamp_start is not None:
+        # Convert reference timestamp to datetime
+        ref_dt = datetime.strptime(historical_runs_timestamp_start, "%Y-%m-%d_%H-%M-%S")
+        # Iterate over folders in the base directory
+        for folder_name in os.listdir("weights"):
+            weight_path = os.path.join("weights", folder_name)
+
+            if not os.path.isdir(weight_path):
+                continue
+            try:
+                folder_dt = datetime.strptime(folder_name, "%Y-%m-%d_%H-%M-%S")
+            except ValueError:
+                continue  # Skip folders that don't match timestamp format
+            # Check if folder is newer
+            if folder_dt >= ref_dt:
+                param_file = os.path.join(weight_path, "parameters.json")
+                loss_log_file = os.path.join(weight_path, "loss_log.txt")
+                if os.path.isfile(param_file) and os.path.isfile(loss_log_file):
+                    with open(param_file, "r", encoding="utf-8") as f:
+                        params.append(json.load(f))
+                    with open(loss_log_file, "r") as f:
+                        val_loss = []
+                        for line in f:
+                            line = line.strip()
+                            if "Val Loss:" in line:
+                                # Split and get the last value
+                                val_str = line.split("Val Loss:")[1].strip()
+                                val_loss.append(float(val_str))
+                            if "val | Loss:" in line:
+                                val_str = line.split("val | Loss:")[1].strip()
+                                val_loss.append(float(val_str))
+                        val_loss = np.array(val_loss)
+                        val_losses.append(val_loss.copy())
+                    weight_paths.append(weight_path)
+                    print(f"--- {folder_name} ---")
+                    # print(json.dumps(params, indent=4))
+
     for zeroth_iteration in [True, False]:
-        if zeroth_iteration:
-            generate_data(zeroth_iteration = True)
-        for hidden_size in [128,32,64]:
-            for n_mp_layers in [10, 5, 20]:
-                train(zeroth_iteration=zeroth_iteration, hidden_size=hidden_size, n_mp_layers=n_mp_layers)
+        # generate_data(zeroth_iteration = zeroth_iteration)
+        for (hidden_size, n_mp_layers) in [(128,10),(128,5),(64,10)]:
+            for layernorm in [True, False]: 
+                for train_magnitude, split_dir_and_mag_losses in [(False, False), (True, True), (True, False)]:
+                    json_ = {
+                    "zeroth_iteration": zeroth_iteration, 
+                    "is_linear": False, 
+                    "has_current_source": True, 
+                    "hidden_size": hidden_size, 
+                    "n_mp_layers": n_mp_layers,
+                    "layernorm": layernorm, 
+                    "train_magnitude": train_magnitude,
+                    "split_dir_and_mag_losses": split_dir_and_mag_losses
+                    }
+                    started = False
+                    completed = False
+                    start_weight_path = []
+                    start_weight_filename = []
+                    start_epoch = -1
+                    for j, param in enumerate(params):
+                        if param == json_:
+                            started = True
+                            val_loss_history = val_losses[j]
+                            start_weight_path = weight_paths[j]
+                            start_epoch = len(val_loss_history)
+                            start_weight_filename = os.path.join(start_weight_path,f"weight_{start_epoch}.pt")
+                            if val_loss_history.size > 6:
+                                part_min_ = np.min(val_loss_history[:-4])
+                                all_min_ = np.min(val_loss_history)
+                                if all_min_ > part_min_*0.99:
+                                    completed = True
+                                    break
+                    if completed:
+                        print(start_weight_filename)
+                        continue
+                    starting_point = None
+                    if started:
+                        starting_point = {"start_weight_path": start_weight_path, "start_weight_filename": start_weight_filename, "start_epoch": start_epoch}
+                    train(*prep_train_or_ver(zeroth_iteration=zeroth_iteration, hidden_size=hidden_size, n_mp_layers=n_mp_layers, layernorm=layernorm, train_magnitude=train_magnitude, split_dir_and_mag_losses=split_dir_and_mag_losses, starting_point=starting_point))

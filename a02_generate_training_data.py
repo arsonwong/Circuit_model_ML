@@ -5,6 +5,7 @@ import os
 import torch
 import random
 import numpy as np
+import re
 
 def generate_data(zeroth_iteration = True, is_linear=False, has_current_source=True):
     if is_linear:
@@ -20,12 +21,23 @@ def generate_data(zeroth_iteration = True, is_linear=False, has_current_source=T
     if zeroth_iteration:
         folder += " zeroth iteration"
 
-    data_num = {"train": 100000, "val": 10000}
+    data_num = {"train": 400000, "val": 10000, "val2": 10000}
 
-    for iter in ["train","val"]:
+    for iter in ["train","val", "val2"]:
         filepath = folder+"/"+iter
         os.makedirs(filepath, exist_ok=True)
+
         pbar = tqdm(total=data_num[iter],desc="Generating " + iter + " data")
+        max_number = -1
+        pattern = re.compile(r"sample_(\d+)\.pkl")
+        for filename in os.listdir(filepath):
+            match = pattern.match(filename)
+            if match:
+                number = int(match.group(1))
+                max_number = max(max_number, number)
+        if max_number >= 0:
+            pbar.update(max_number+1)
+        
         outputs = []
         while pbar.n < data_num[iter]:
             grid_circuit = GridCircuit(rows=4,cols=4,is_linear=is_linear,has_current_source=has_current_source) # makes a random grid circuit each time
