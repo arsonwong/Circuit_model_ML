@@ -1,0 +1,10 @@
+# If true, train/val data only contains initial states of voltages (zeros except at the boundaries with defined voltage)
+zeroth_iteration: true
+# If true, circuit contains diodes
+is_linear: false
+# Specifies if the circuit includes a current source
+has_current_source: false
+# for circuits with current sources and diodes, in the initial
+# state before the diode turns on the condition number of the system
+# of equations may huge.  We can filter out cases with very large initial condition numbers
+acceptable_initial_cond_num: 1000.0

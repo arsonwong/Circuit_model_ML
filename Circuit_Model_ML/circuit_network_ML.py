@@ -87,11 +87,10 @@ class LearnedSimulator(torch.nn.Module):
         torch.nn.init.xavier_uniform_(self.embed_type.weight)
 
     def forward(self, data: pyg.data.Data, modifiers = None):
-        node_error = self.cn.forward(data)
-
-        node_feature = torch.cat((self.embed_type(data.y[:,0].long()), data.y[:,1:], data.x, node_error), dim=-1)
+        node_error = self.cn.forward(data).float()
+        node_feature = torch.cat((self.embed_type(data.y[:,0].long()), data.y[:,1:].float(), data.x.float(), node_error), dim=-1)
         node_feature = self.node_in(node_feature)
-        edge_feature = self.edge_in(data.edge_attr)
+        edge_feature = self.edge_in(data.edge_attr.float())
         # stack of GNN layers
         for i in range(self.n_mp_layers):
             node_feature, edge_feature = self.layers[i](node_feature, data.edge_index, edge_feature=edge_feature, diode_nodes=data.diode_nodes_tensor)

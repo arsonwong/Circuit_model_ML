@@ -70,10 +70,14 @@ class GridCircuit():
         random_number = torch.rand(num_edges)  # uniform [0,1)
         if self.is_linear:
             if self.has_current_source:
-                self.edge_type[random_number < 0.3] = 1
+                find_ = np.where(random_number < 0.3)[0]
+                if len(find_) > 0:
+                    self.edge_type[find_[0]] = 1
         else:
             if self.has_current_source:
-                self.edge_type[random_number < 0.3] = 1
+                find_ = np.where(random_number < 0.3)[0]
+                if len(find_) > 0:
+                    self.edge_type[find_[0]] = 1
                 self.edge_type[random_number > 0.7] = 2
             else:
                 self.edge_type[random_number > 0.6] = 2
@@ -161,9 +165,9 @@ class GridCircuit():
         )
         
         return data
-    def solve(self, convergence_RMS=1e-8, suppress_warning=False):
+    def solve(self, convergence_RMS=1e-8, acceptable_initial_cond_num=None, suppress_warning=False):
         data = self.export()
-        success, x, aux = solve_circuit(data, convergence_RMS=convergence_RMS, suppress_warning=suppress_warning)
+        success, x, aux = solve_circuit(data, convergence_RMS=convergence_RMS, acceptable_initial_cond_num=acceptable_initial_cond_num, suppress_warning=suppress_warning)
         if x is not None:
             self.voltages = x
         return success, aux
@@ -222,7 +226,7 @@ class GridCircuit():
             ax.set_ylim(-1,self.rows)
             plt.show()
 
-def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,convergence_RMS=1e-8, suppress_warning=False):
+def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,convergence_RMS=1e-8, suppress_warning=False,acceptable_initial_cond_num=None):
     cn = CircuitNetwork()
     find_ = torch.where(data.diode_nodes_tensor[:data.edge_index.shape[1] // 2,0]>=0)[0]
     diode_edges = data.diode_nodes_tensor[find_,:]
@@ -234,13 +238,17 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
     x = data.x
     record = []
     diode_turned_on = False
-    for _ in range(50):
+    for i in range(50):
         J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, 
                                                                         edge_index=data.edge_index, 
                                                                         edge_attr=data.edge_attr, 
                                                                         diode_nodes_tensor=data.diode_nodes_tensor,
                                                                         y=data.y)), x).squeeze()
         J = J[rows][:, rows]
+        if i==0 and acceptable_initial_cond_num is not None:
+            if torch.linalg.cond(J) > acceptable_initial_cond_num:
+                return False, None, None
+
         Y = -node_error[rows]
         delta_x = torch.zeros_like(x)
         try:
@@ -250,7 +258,6 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
                 print(f"Linear solver error: {e}")
             return False, None, None
         delta_x[rows] = X
-        record.append({"x": x.clone().detach(), "delta_x": delta_x.clone().detach(), "RMS": RMS})
         ratio = 1.0
         if diode_edges.shape[0] > 0:
             delta_diode_V = delta_x[diode_edges[:,1]]-delta_x[diode_edges[:,0]]
@@ -263,6 +270,9 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
             if new_diode_V[max_diode_V_index] > diode_V_hard_limit:
                 diode_turned_on = True
                 ratio = min(ratio,(diode_V_hard_limit-old_diode_V[max_diode_V_index])/delta_diode_V[max_diode_V_index])
+        delta_x_altered = delta_x*ratio
+        record.append({"x": x.clone().detach(), "delta_x": delta_x.clone().detach(), "RMS": RMS, 
+                       "delta_x_altered": delta_x_altered.clone().detach()})
         x = x + delta_x*ratio
         data.x = x
         node_error = cn.forward(data)

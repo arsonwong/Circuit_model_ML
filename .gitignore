@@ -167,3 +167,5 @@ example_calc_solar_simulator_error/
 *.json
 *.jpg
 *.pt
+*.pth
+*.txt
