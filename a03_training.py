@@ -46,11 +46,10 @@ def custom_collate_fn(data_list):
     return batch
 
 class Dataset(pyg.data.Dataset):
-    def __init__(self, data_path, split, single_example=False):
+    def __init__(self, data_path, split):
         super().__init__()
         self.data_path = data_path
         self.split = split
-        self.single_example = single_example
         max_size = max([int(m.group(1)) for m in (re.match(r"sample_(\d+)\.pkl", f) for f in os.listdir(os.path.join(self.data_path, self.split))) if m] or [-1])+1
         self.data_set = []
         self.aux_set = []
@@ -74,13 +73,7 @@ class Dataset(pyg.data.Dataset):
         return len(self.data_set)
     
     def get(self, idx):
-        idx_ = 0
-        if self.single_example is False:
-            idx_ = idx
-        return self.data_set[idx_]
-
-def weight_file_name(path,current_epoch,supervised,single_example):
-    return f"{path}/model_epoch_{current_epoch}_supervised={supervised}_single_example={single_example}.pt"
+        return self.data_set[idx]
 
 def prep_train_or_ver(zeroth_iteration = True, is_linear=False, has_current_source=True, 
                  hidden_size=128, n_mp_layers=10, layernorm=True, loss_fn=0, starting_point=None, learning_rate = 1e-4):
@@ -118,7 +111,6 @@ def train(model, optimizer, folder, weight_path, loss_fn, epochs = 100, batch_si
     train_dataset = Dataset(folder,"train")
     val_dataset = Dataset(folder,"val")
 
-    train_dataset.single_example = False
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate_fn)
 
