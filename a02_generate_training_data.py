@@ -25,7 +25,7 @@ def get_data_folder(is_linear, has_current_source, zeroth_iteration):
 
 def generate_data(zeroth_iteration = True, is_linear=False, has_current_source=True, acceptable_initial_cond_num=1e3, overwrite=False):
     folder = get_data_folder(is_linear, has_current_source, zeroth_iteration)
-    data_num = {"train": 100000, "val": 10000, "val2": 10000}
+    data_num = {"train": 100000, "val": 10000, "val2": 1000}
 
     for iter in ["train","val", "val2"]:
         filepath = folder+"/"+iter

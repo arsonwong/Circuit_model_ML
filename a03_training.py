@@ -46,14 +46,16 @@ def custom_collate_fn(data_list):
     return batch
 
 class Dataset(pyg.data.Dataset):
-    def __init__(self, data_path, split):
+    def __init__(self, data_path, split, size=None):
         super().__init__()
         self.data_path = data_path
         self.split = split
         max_size = max([int(m.group(1)) for m in (re.match(r"sample_(\d+)\.pkl", f) for f in os.listdir(os.path.join(self.data_path, self.split))) if m] or [-1])+1
+        if size is None or size > max_size:
+            size = max_size
+        self.size = size
         self.data_set = []
-        self.aux_set = []
-        for i in tqdm(range(max_size), desc=f"Loading {split} dataset"):
+        for i in tqdm(range(size), desc=f"Loading {split} dataset"):
             file_path = f"{self.data_path}/{self.split}/sample_{i}.pkl"
             if not os.path.exists(file_path):
                 continue
@@ -70,7 +72,7 @@ class Dataset(pyg.data.Dataset):
                 self.data_set.append(data)
 
     def len(self):
-        return len(self.data_set)
+        return self.size
     
     def get(self, idx):
         return self.data_set[idx]

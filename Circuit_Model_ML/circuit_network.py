@@ -226,8 +226,8 @@ class GridCircuit():
             ax.set_ylim(-1,self.rows)
             plt.show()
 
-def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,convergence_RMS=1e-8, suppress_warning=False,acceptable_initial_cond_num=None):
-    cn = CircuitNetwork()
+def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,convergence_RMS=1e-8, suppress_warning=False,acceptable_initial_cond_num=None,return_num_iterations=False,max_log_diode_I=None):
+    cn = CircuitNetwork(max_log_diode_I=max_log_diode_I)
     find_ = torch.where(data.diode_nodes_tensor[:data.edge_index.shape[1] // 2,0]>=0)[0]
     diode_edges = data.diode_nodes_tensor[find_,:]
     rows = torch.where(data.y[:,0] != 1)[0]
@@ -282,6 +282,8 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
             break
     aux = {'RMS': RMS, 'record': record, 'diode_turned_on': diode_turned_on}
     if RMS < convergence_RMS:
+        if return_num_iterations:
+            return True, x, i
         return True, x, aux
     if not suppress_warning:
         print("Non convergence: RMS = ", RMS)

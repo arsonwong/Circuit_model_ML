@@ -7,4 +7,4 @@ has_current_source: false
 # for circuits with current sources and diodes, in the initial
 # state before the diode turns on the condition number of the system
 # of equations may huge.  We can filter out cases with very large initial condition numbers
-acceptable_initial_cond_num: 1000.0
+acceptable_initial_cond_num: 1000000000000000

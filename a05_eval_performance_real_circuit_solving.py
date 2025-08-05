@@ -12,10 +12,13 @@ from a02_generate_training_data import get_data_folder
 if __name__ == "__main__":
     zeroth_iteration, is_linear, has_current_source, _ = get_data_generation_settings()
     batch_size = 256
-    historical_runs_timestamp_start = "2025-07-30_11-42-23"  # set to None if ignore historical runs
-    historical_runs_timestamp_end = "2025-07-30_13-48-41"  # set to None if ignore historical runs
+    # historical_runs_timestamp_start = "2025-07-30_11-42-23"  # set to None if ignore historical runs
+    # historical_runs_timestamp_end = "2025-07-30_13-48-41"  # set to None if ignore historical runs
     # historical_runs_timestamp_start = "2025-07-31_06-42-05"  # set to None if ignore historical runs
     # historical_runs_timestamp_end = "2025-07-31_11-46-27"  # set to None if ignore historical runs
+
+    historical_runs_timestamp_start = "2025-07-30_11-42-23"  # set to None if ignore historical runs
+    historical_runs_timestamp_end = "2025-07-31_11-46-27"  # set to None if ignore historical runs
     params = []
     if historical_runs_timestamp_start is not None:
         start_dt = datetime.strptime(historical_runs_timestamp_start, "%Y-%m-%d_%H-%M-%S")
@@ -59,7 +62,7 @@ if __name__ == "__main__":
     cn = CircuitNetwork().to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     for param in params:
         folder = get_data_folder(param["is_linear"], param["has_current_source"], param["zeroth_iteration"])
-        val_dataset = Dataset(folder,"val2",size=1000)
+        val_dataset = Dataset(folder,"val2",size=300)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate_fn)
         hidden_size = param["hidden_size"]
         n_mp_layers = param["n_mp_layers"]
@@ -68,10 +71,8 @@ if __name__ == "__main__":
         model.eval()
         pbar = tqdm(total=len(val_dataset))
         torch.set_grad_enabled(False)
-        direction_loss = torch.tensor([0,0,0],dtype=torch.float).to(device)
-        abs_loss = torch.tensor([0,0,0,0,0],dtype=torch.float).to(device)
-        solver_num_iterations = torch.tensor([0,0,0,0,0,0],dtype=torch.float).to(device)
-        solver_num_success = torch.tensor([0,0,0,0,0,0],dtype=torch.float).to(device)
+        solver_num_iterations = torch.zeros(12,dtype=torch.float).to(device)
+        solver_num_success = torch.zeros(12,dtype=torch.float).to(device)
         sample_count = 0
         node_count = 0
         for batch in val_loader:
@@ -108,7 +109,7 @@ if __name__ == "__main__":
                                                                         edge_attr=sample_edge_attr, 
                                                                         diode_nodes_tensor=sample_diode_nodes_tensor,
                                                                         y=sample_y)), sample_x_record).squeeze()
-                
+                                
                 rows = torch.where(sample_y[:,0]!=1)[0] # not pinned voltage boundary condition
                 J_ = J[rows][:, rows]
 
@@ -121,8 +122,6 @@ if __name__ == "__main__":
 
                 RMS = torch.sqrt(torch.sum(sample_node_error_)).item()
                 if torch.norm(sample_answer_) > 0 and RMS < 1e-4:
-                    solver_num_iterations[5] += num_iterations
-                    solver_num_success[5] += 1
                     if torch.norm(sample_delta_x_record_) ==0 or torch.isinf(sample_delta_x_record_).any():
                         sample_delta_x_record_ = torch.ones_like(sample_output_).to(device)
                     if torch.norm(sample_initial_node_error_) ==0:
@@ -146,48 +145,51 @@ if __name__ == "__main__":
                     linear_guess_delta_x_altered = sample_delta_x_altered_record_
 
                     if param["loss_fn"] > 0:
-                        ML_guess_delta_x = sample_output_
+                        ML_guess_delta_x = sample_output_.double()
                     else:
                         if torch.norm(sample_output_) == 0:
                             sample_output_ = torch.ones_like(sample_output_).to(device)
                         p_ = sample_output_.double()
                         alpha = torch.sum((J_ @ p_) * Y_)/torch.sum((J_ @ p_)**2)
-                        ML_guess_delta_x = p_*alpha
+                        ML_guess_delta_x = p_*alpha 
 
-                    abs_loss[0] += torch.sum((sample_answer_-ML_guess_delta_x)**2) 
-                    abs_loss[1] += torch.sum((sample_answer_-linear_guess_delta_x)**2) 
-                    abs_loss[2] += torch.sum((sample_answer_-linear_guess_delta_x_altered)**2) 
-                    abs_loss[3] += torch.sum((sample_answer_-gradient_guess_delta_x)**2) 
-                    abs_loss[4] += torch.sum((sample_answer_-CG_guess_delta_x)**2) 
+                    data = pyg.data.Data(x=sample_x_record, 
+                                        edge_index=sample_edge_index, 
+                                        edge_attr=sample_edge_attr, 
+                                        diode_nodes_tensor=sample_diode_nodes_tensor,
+                                        y=sample_y)
+                    
+                    guesses = [ML_guess_delta_x, linear_guess_delta_x, linear_guess_delta_x_altered, gradient_guess_delta_x, sample_x_record[rows]]
+                    count = 0
+                    for method in ["clamp","no_clamp"]:
+                        for guess in guesses:
+                                data.x[rows] = guess
+                                if method=="clamp":
+                                    diode_V_pos_delta_limit=0.5
+                                    diode_V_hard_limit=0.8
+                                else:
+                                    diode_V_pos_delta_limit=1000
+                                    diode_V_hard_limit=10000
+                                                  
+                                success, voltages, num_iterations = solve_circuit(data,diode_V_pos_delta_limit=diode_V_pos_delta_limit,
+                                                                                diode_V_hard_limit=diode_V_hard_limit,
+                                                                                return_num_iterations=True,suppress_warning=True,max_log_diode_I=5)
+                                if success:
+                                    solver_num_iterations[count] += num_iterations
+                                    solver_num_success[count] += 1
+                                count += 1
 
                     if torch.norm(sample_output_) == 0:
                         sample_output_ = torch.ones_like(sample_output_).to(device)
 
-                    answer_direction = sample_answer_ / torch.norm(sample_answer_)
-                    ML_direction = sample_output_ / torch.norm(sample_output_)
-                    linear_direction = sample_delta_x_record_ / torch.norm(sample_delta_x_record_)
-                    gradient_direction = sample_initial_node_error_ / torch.norm(sample_initial_node_error_)
-                    direction_loss[0] += torch.sum((answer_direction-ML_direction)**2) 
-                    direction_loss[1] += torch.sum((answer_direction-linear_direction)**2) 
-                    direction_loss[2] += torch.sum((answer_direction-gradient_direction)**2) 
-                    sample_count += 1
-                    node_count += rows.numel()
                 pbar.update(1)
 
-        RMS_loss = torch.sqrt(abs_loss/node_count)
-        direction_loss = direction_loss/node_count
         avg_solver_num_iterations = solver_num_iterations/solver_num_success
-        losses = {
-            "RMS_loss_ML": RMS_loss[0].item(),
-            "RMS_loss_linear_guess": RMS_loss[1].item(),
-            "RMS_loss_linear_guess_altered": RMS_loss[2].item(),
-            "RMS_loss_gradient_guess": RMS_loss[3].item(),
-            "RMS_loss_CG_guess": RMS_loss[4].item(),
-            "direction_loss_ML": direction_loss[0].item(),
-            "direction_loss_linear_guess": direction_loss[1].item(),
-            "direction_loss_gradient_guess": direction_loss[2].item(),
+        performance = {
+            "avg_solver_num_iterations": avg_solver_num_iterations.tolist(),
+            "solver_num_success": solver_num_success.tolist()
             }
 
-        with open(os.path.join(param["weight_path"],"eval_losses.json"), "w", encoding="utf-8") as f:
-            json.dump(losses, f, indent=2)
+        with open(os.path.join(param["weight_path"],"circuit_solving_performance.json"), "w", encoding="utf-8") as f:
+            json.dump(performance, f, indent=2)
 
