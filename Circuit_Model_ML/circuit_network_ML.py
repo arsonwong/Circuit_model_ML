@@ -39,20 +39,15 @@ class InteractionNetwork(pyg.nn.MessagePassing):
         self.lin_edge = MLP(hidden_size * 3, hidden_size, hidden_size, layers, layernorm=layernorm)
         self.lin_node = MLP(hidden_size * 2, hidden_size, hidden_size, layers, layernorm=layernorm)
 
-    def forward(self, x, edge_index, edge_feature, diode_nodes):
-        edge_out, aggr = self.propagate(edge_index, x=(x, x), edge_feature=edge_feature, diode_nodes=diode_nodes, ref_x=x)
+    def forward(self, x, edge_index, edge_feature):
+        edge_out, aggr = self.propagate(edge_index, x=(x, x), edge_feature=edge_feature)
         node_out = self.lin_node(torch.cat((x, aggr), dim=-1))
         edge_out = edge_feature + edge_out
         node_out = x + node_out
         return node_out, edge_out
 
-    def message(self, x_i, x_j, edge_feature, diode_nodes, ref_x):
-        x_i_ = x_i
-        x_j_ = x_j
-        find_ = torch.where(diode_nodes[:,0]>=0)[0]
-        x_i_[find_] = ref_x[diode_nodes[find_,0]]
-        x_j_[find_] = ref_x[diode_nodes[find_,1]]
-        x = torch.cat((x_i_, x_j_, edge_feature), dim=-1)
+    def message(self, x_i, x_j, edge_feature):
+        x = torch.cat((x_i, x_j, edge_feature), dim=-1)
         x = self.lin_edge(x)
         return x
 
@@ -93,7 +88,7 @@ class LearnedSimulator(torch.nn.Module):
         edge_feature = self.edge_in(data.edge_attr.float())
         # stack of GNN layers
         for i in range(self.n_mp_layers):
-            node_feature, edge_feature = self.layers[i](node_feature, data.edge_index, edge_feature=edge_feature, diode_nodes=data.diode_nodes_tensor)
+            node_feature, edge_feature = self.layers[i](node_feature, data.edge_index, edge_feature=edge_feature)
         # post-processing
         out = self.node_out(node_feature)
 

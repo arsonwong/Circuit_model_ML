@@ -16,7 +16,7 @@ def rotate_points(xy_pairs, origin, angle_deg):
         rotated.append((rx, ry))
     return rotated
 
-def draw_diode_symbol(ax, x=0, y=0, color="black", up_or_down="down", is_LED=False, rotation=0):
+def draw_diode_symbol(ax, x=0, y=0, color="black", up_or_down="up", is_LED=False, rotation=0):
     origin = (x, y)
     dir = 1 if up_or_down == "down" else -1
 

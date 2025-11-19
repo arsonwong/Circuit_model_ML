@@ -10,9 +10,11 @@ from .utilities import *
 class GridCircuit():
     diode_V_hard_limit = 0.8
     diode_V_pos_delta_limit = 0.5
-    def __init__(self,rows=4,cols=4,is_linear=False,has_current_source=True):
+    def __init__(self,rows=4,cols=4,node_density=0.8,edge_density=0.8,is_linear=False,has_current_source=True):
         self.rows = rows
         self.cols = cols
+        self.edge_density = edge_density
+        self.node_density = node_density
         self.is_linear = is_linear
         self.has_current_source = has_current_source
         self.fill_nodes()
@@ -21,14 +23,13 @@ class GridCircuit():
     def fill_nodes(self,num_nodes=None):
         max_ = self.rows*self.cols
         if num_nodes is None:
-            num_nodes = int(max_ * 0.8)
-        if num_nodes > max_:
-            num_nodes = max_
+            num_nodes = int(max_ * self.node_density)
         rand_perm = np.random.permutation(max_)
         self.num_nodes = num_nodes
         self.node_pos = rand_perm[:num_nodes]
         self.node_rows = np.floor(self.node_pos / self.cols)
         self.node_cols = self.node_pos - self.node_rows*self.cols
+        # take out nodes that end up on an island
         has_edge = np.ones(self.num_nodes, dtype=bool)
         for i in range(self.num_nodes):
             indices = np.where(np.abs(self.node_rows-self.node_rows[i])+np.abs(self.node_cols-self.node_cols[i])<=1)[0]
@@ -40,21 +41,18 @@ class GridCircuit():
         self.node_cols = self.node_cols[find_]
         self.num_nodes = len(find_)
     def fill_edges(self,num_edges=None):
+        # single directed edges from lower index node to higher index node
         possible_edges = []
         for i in range(self.num_nodes):
-            indices = np.where(np.abs(self.node_rows-self.node_rows[i])+np.abs(self.node_cols-self.node_cols[i])<=1)[0]
-            for index in indices:
-                possible_edges.append([i,index])
+            indices = np.where((np.arange(self.num_nodes)>i) & (np.abs(self.node_rows-self.node_rows[i])+np.abs(self.node_cols-self.node_cols[i])<=1))[0]
+            possible_edges.extend([[i, index] for index in indices])
         possible_edges = torch.tensor(possible_edges,dtype=torch.long)
-        find_ = torch.where(possible_edges[:,0]<possible_edges[:,1])[0]
-        possible_edges = possible_edges[find_]
         max_ = possible_edges.shape[0]
         if num_edges is None:
             num_edges = int(max_ * 0.8)
-        if num_edges > max_:
-            num_edges = max_
         rand_perm = torch.randperm(max_)
         self.edges = possible_edges[rand_perm[:num_edges],:]
+        # if any node became totally disconnected, then connect back to a neighbour
         for i in range(self.num_nodes):
             if not torch.any((self.edges[:, 0] == i) | (self.edges[:, 1] == i)):
                 is_in_possible = (possible_edges[:, 0] == i) | (possible_edges[:, 1] == i)
@@ -65,6 +63,7 @@ class GridCircuit():
         num_edges = self.edges.shape[0]
         polarity = torch.randint(0, 2, (num_edges,))
         find_ = torch.where(polarity == 0)[0]
+        # single directed edges from one index to another
         self.edges[find_] = self.edges[find_][:, [1, 0]]
         self.edge_type = torch.zeros(num_edges, dtype=torch.long)
         random_number = torch.rand(num_edges)  # uniform [0,1)
@@ -114,40 +113,37 @@ class GridCircuit():
                 self.bc[list_[0]] = 0
     def export(self):
         COO_tensor = torch.zeros(2*self.edges.shape[1],7,dtype=torch.double)
-        diode_nodes_tensor = torch.zeros(2*self.edges.shape[1],2,dtype=torch.long)
         node_boundary_conditions = torch.zeros(self.num_nodes,3,dtype=torch.double)
         for i, edge in enumerate(self.edges.T):
+            # edge[0] to edge[1]
             COO_tensor[i,0:2] = edge.clone().detach()
-            # IL, cond, log_I0, n, breakdownV
+            # IL, cond, log_I0, diode polarity 
+            # diode polarity --> if edge is i,j, and diode points from i to j, then diode polarity is 1
+            # otherwise it is -1
             edge_feature = torch.zeros(1,5,dtype=torch.double)
-            edge_feature[0,3] = 1.0
             # diode neg node, diode pos node
-            diode_nodes = torch.tensor([-1,-1], dtype=torch.long)
             if self.edge_type[i]==0:
                 edge_feature[0,1] = 1/self.edge_value[i]
             elif self.edge_type[i]==1:
                 edge_feature[0,0] = self.edge_value[i]
             elif self.edge_type[i]==2:
-                edge_feature[0,2] = -np.log(self.edge_value[i])
-                diode_nodes = torch.tensor([edge[1],edge[0]], dtype=torch.long)
-            COO_tensor[i,2:] = edge_feature
-            diode_nodes_tensor[i,:] = diode_nodes
-
-            COO_tensor[i+self.edges.shape[1],0:2] = torch.flip(edge, dims=[0]).clone().detach()
-            # IL, cond, log_I0, n, breakdownV
-            edge_feature = torch.zeros(1,5,dtype=torch.double)
-            edge_feature[0,3] = 1.0
-            # diode neg node, diode pos node
-            diode_nodes = torch.tensor([-1,-1], dtype=torch.long)
-            if self.edge_type[i]==0:
-                edge_feature[0,1] = 1/self.edge_value[i]
-            elif self.edge_type[i]==1:
-                edge_feature[0,0] = -self.edge_value[i]
-            elif self.edge_type[i]==2:
                 edge_feature[0,2] = np.log(self.edge_value[i])
-                diode_nodes = torch.tensor([edge[1], edge[0]], dtype=torch.long)
-            COO_tensor[i+self.edges.shape[1],2:] = edge_feature
-            diode_nodes_tensor[i+self.edges.shape[1],:] = diode_nodes
+                # diode polarity --> if edge is i,j, and diode points from i to j, then diode polarity is 1
+                # otherwise it is -1
+                edge_feature[0,3] = 1
+            COO_tensor[i,2:] = edge_feature
+
+            # edge[1] to edge[0]
+            j = i+self.edges.shape[1]
+            COO_tensor[j,0:2] = torch.flip(edge, dims=[0]).clone().detach()
+            COO_tensor[j,2:] = edge_feature
+            if self.edge_type[i]==0:
+                pass 
+            elif self.edge_type[i]==1:
+                COO_tensor[j,2] *= -1 # flip the sign of the current
+            elif self.edge_type[i]==2:
+                COO_tensor[j,5] *= -1 # flip the sign of the diode polarity
+
         for i in range(self.num_nodes):
             if not np.isnan(self.bc[i]):
                 node_boundary_conditions[i,0] = 1
@@ -161,7 +157,6 @@ class GridCircuit():
             edge_index=edge_index,  
             edge_attr=edge_feature, 
             y=node_boundary_conditions,
-            diode_nodes_tensor = diode_nodes_tensor
         )
         
         return data
@@ -213,23 +208,25 @@ class GridCircuit():
                             else:
                                 text = f"{i}:{self.bc[i]*1e3:.3f}m"
                             ax.text(self.node_cols[i]+0.2, self.node_rows[i]-0.2, text, ha="center", va="center", fontsize=8,color="red")
-            if hasattr(self,"voltages"):
+            
                 for i in range(self.num_nodes):
-                    if abs(self.voltages[i].item()) >= 1:
-                        text = f"{i}:{self.voltages[i].item():.3f}"
-                        # text = f"{self.voltages[i].item():.3f}"
+                    if hasattr(self,"voltages"):
+                        if abs(self.voltages[i].item()) >= 1:
+                            text = f"{i}:{self.voltages[i].item():.3f}"
+                            # text = f"{self.voltages[i].item():.3f}"
+                        else:
+                            text = f"{i}:{self.voltages[i].item()*1e3:.3f}m"
+                            # text = f"{self.voltages[i].item():.3f}"
                     else:
-                        text = f"{i}:{self.voltages[i].item()*1e3:.3f}m"
-                        # text = f"{self.voltages[i].item():.3f}"
+                        text = f"{i}"
                     ax.text(self.node_cols[i]+0.2, self.node_rows[i]-0.1, text, ha="center", va="center", fontsize=8,color="blue")
             ax.set_xlim(-1,self.cols)
             ax.set_ylim(-1,self.rows)
             plt.show()
 
-def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,convergence_RMS=1e-8, suppress_warning=False,acceptable_initial_cond_num=None,return_num_iterations=False,max_log_diode_I=None):
+def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,convergence_RMS=1e-8, 
+                  suppress_warning=False,acceptable_initial_cond_num=None,return_num_iterations=False,max_log_diode_I=None):
     cn = CircuitNetwork(max_log_diode_I=max_log_diode_I)
-    find_ = torch.where(data.diode_nodes_tensor[:data.edge_index.shape[1] // 2,0]>=0)[0]
-    diode_edges = data.diode_nodes_tensor[find_,:]
     rows = torch.where(data.y[:,0] != 1)[0]
     indices = torch.where(data.y[:,0]==1) # pinned voltage boundary condition
     data.x[indices[0],0] = data.y[indices[0],1]
@@ -238,11 +235,16 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
     x = data.x
     record = []
     diode_turned_on = False
+
+    polarity = data.edge_attr[:,3]
+    find_ = torch.where(polarity != 0)[0] # diode connections have polarity of 1 or -1
+    polarity_ = polarity[find_].unsqueeze(1)
+    diode_edges = data.edge_index[:,find_].T
+
     for i in range(50):
         J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, 
                                                                         edge_index=data.edge_index, 
                                                                         edge_attr=data.edge_attr, 
-                                                                        diode_nodes_tensor=data.diode_nodes_tensor,
                                                                         y=data.y)), x).squeeze()
         J = J[rows][:, rows]
         if i==0 and acceptable_initial_cond_num is not None:
@@ -260,16 +262,18 @@ def solve_circuit(data,diode_V_pos_delta_limit=0.5,diode_V_hard_limit=0.8,conver
         delta_x[rows] = X
         ratio = 1.0
         if diode_edges.shape[0] > 0:
-            delta_diode_V = delta_x[diode_edges[:,1]]-delta_x[diode_edges[:,0]]
+            delta_diode_V = polarity_*(delta_x[diode_edges[:,1]]-delta_x[diode_edges[:,0]])
             max_diode_V_pos_delta = torch.max(delta_diode_V).item()
-            old_diode_V = x[diode_edges[:,1]]-x[diode_edges[:,0]]
+            old_diode_V = polarity_*(x[diode_edges[:,1]]-x[diode_edges[:,0]])
             new_diode_V = old_diode_V + delta_diode_V
             max_diode_V_index = torch.argmax(new_diode_V)
             if max_diode_V_pos_delta > diode_V_pos_delta_limit:
                 ratio = diode_V_pos_delta_limit/max_diode_V_pos_delta
             if new_diode_V[max_diode_V_index] > diode_V_hard_limit:
                 diode_turned_on = True
-                ratio = min(ratio,(diode_V_hard_limit-old_diode_V[max_diode_V_index])/delta_diode_V[max_diode_V_index])
+                ratio_ = (diode_V_hard_limit-old_diode_V[max_diode_V_index])/delta_diode_V[max_diode_V_index]
+                ratio_ = ratio_.item()
+                ratio = min(ratio,ratio_)
         delta_x_altered = delta_x*ratio
         record.append({"x": x.clone().detach(), "delta_x": delta_x.clone().detach(), "RMS": RMS, 
                        "delta_x_altered": delta_x_altered.clone().detach()})
@@ -298,32 +302,40 @@ class CircuitNetwork(pyg.nn.MessagePassing):
         if x is None:
             x = data.x
         
-        return self.propagate(data.edge_index, x=(x,x), edge_feature=data.edge_attr, y=data.y, diode_nodes=data.diode_nodes_tensor, ref_x=x)
+        return self.propagate(data.edge_index, x=(x,x), edge_feature=data.edge_attr, y=data.y)
 
-    def message(self, x_i, x_j, edge_feature, diode_nodes, ref_x):
-        # resistor - current is positive from j --> i
+    def message(self, x_i, x_j, edge_feature):
+        # current is positive from j --> i, i.e. going into left node
+        # resistor
         cond = edge_feature[:,1].unsqueeze(1)
         I = cond*(x_j - x_i)
+
         # current source
         IL = edge_feature[:,0].unsqueeze(1)
         I += IL
-        # diode
-        find_ = torch.where(diode_nodes[:,0]>=0)[0]
-        diode_V_drop = (ref_x[diode_nodes[find_,1],0] - ref_x[diode_nodes[find_,0],0]).unsqueeze(1)
+        # diode.  If polarity = 1, means diode points from i to j, diode_V_drop = x_i - x_j
+        # I = -I0*(exp(diode_V_drop)-1) according to convention
+        # If polarity = -1, means diode points from j to i, diode_V_drop = -(x_i - x_j)
+        # I = +I0*(exp(diode_V_drop)-1) according to convention
+        # so, I = -polarity * (exp(polarity * (x_i - x_j))-1)
+        polarity = edge_feature[:,3].unsqueeze(1)
+        find_ = torch.where(polarity != 0)[0] # diode connections have polarity of 1 or -1
+
+        diode_V_drop = polarity[find_]*(x_i[find_] - x_j[find_])
         log_I0 = edge_feature[find_,2].unsqueeze(1)
-        I0 = torch.exp(-torch.abs(log_I0))
-        n = edge_feature[find_,3].unsqueeze(1)
-        breakdownV = edge_feature[find_,4].unsqueeze(1)
+        polarity_ = edge_feature[find_,3].unsqueeze(1)
+        I0 = torch.exp(log_I0)
+        
         if self.max_log_diode_I is not None:
             max_log_diode_I = torch.tensor(self.max_log_diode_I, device=edge_feature.device)
             max_diode_I = torch.exp(max_log_diode_I)
-            max_V = (n*0.02568)*(max_log_diode_I + torch.abs(log_I0)) + breakdownV
+            max_V = (0.02568)*(max_log_diode_I + torch.abs(log_I0))
             find2_ = torch.where(diode_V_drop <= max_V)[0]
             find3_ = torch.where(diode_V_drop > max_V)[0]
-            I[find_[find2_]] -= -torch.sign(log_I0[find2_])*I0[find2_]*(torch.exp((diode_V_drop[find2_]-breakdownV[find2_])/(n[find2_]*0.02568))-1.0)
-            I[find_[find3_]] -= -torch.sign(log_I0[find3_])*(max_diode_I + (diode_V_drop[find3_]-max_V[find3_])*max_diode_I/0.02568)
+            I[find_[find2_]] -= polarity_[find2_]*I0[find2_]*(torch.exp(diode_V_drop[find2_]/0.02568)-1.0)
+            I[find_[find3_]] -= polarity_[find3_]*(max_diode_I + (diode_V_drop[find3_]-max_V[find3_])*max_diode_I/0.02568)
         else:
-            I[find_] -= -torch.sign(log_I0)*I0*(torch.exp((diode_V_drop-breakdownV)/(n*0.02568))-1.0)
+            I[find_] -= polarity_*I0*(torch.exp(diode_V_drop/0.02568)-1.0)
         return I
     
     def aggregate(self, inputs, index, dim_size=None, y=None):
