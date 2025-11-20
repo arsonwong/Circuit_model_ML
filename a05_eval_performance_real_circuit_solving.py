@@ -6,8 +6,9 @@ import torch_geometric as pyg
 from Circuit_Model_ML.circuit_network_ML import *
 from Circuit_Model_ML.circuit_network import *
 import os
-from a03_training import *
-from a02_generate_training_data import get_data_folder
+import datetime
+from utilities import get_data_generation_settings, get_data_folder
+from a03_training import Dataset
 
 if __name__ == "__main__":
     zeroth_iteration, is_linear, has_current_source, _ = get_data_generation_settings()
@@ -63,7 +64,7 @@ if __name__ == "__main__":
     for param in params:
         folder = get_data_folder(param["is_linear"], param["has_current_source"], param["zeroth_iteration"])
         val_dataset = Dataset(folder,"val2",size=300)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate_fn)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size)
         hidden_size = param["hidden_size"]
         n_mp_layers = param["n_mp_layers"]
         model = LearnedSimulator(hidden_size=hidden_size,n_mp_layers=n_mp_layers).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
@@ -93,9 +94,6 @@ if __name__ == "__main__":
                 find2_ = torch.where((batch.edge_index[0,:]>=min_index) & (batch.edge_index[0,:]<=max_index))[0]
                 sample_edge_index = batch.edge_index[:,find2_]-min_index
                 sample_edge_attr = batch.edge_attr[find2_,:]
-                sample_diode_nodes_tensor = batch.diode_nodes_tensor[find2_,:]
-                find3_ = torch.where(sample_diode_nodes_tensor[:,0]>=0)[0]
-                sample_diode_nodes_tensor[find3_,:] -= min_index
                 sample_y = batch.y[find_,:]
                 sample_output = output[find_,:]
                 sample_answer = answer[find_,:]
@@ -106,8 +104,7 @@ if __name__ == "__main__":
 
                 J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, 
                                                                         edge_index=sample_edge_index, 
-                                                                        edge_attr=sample_edge_attr, 
-                                                                        diode_nodes_tensor=sample_diode_nodes_tensor,
+                                                                        edge_attr=sample_edge_attr,
                                                                         y=sample_y)), sample_x_record).squeeze()
                                 
                 rows = torch.where(sample_y[:,0]!=1)[0] # not pinned voltage boundary condition
@@ -155,11 +152,10 @@ if __name__ == "__main__":
 
                     data = pyg.data.Data(x=sample_x_record, 
                                         edge_index=sample_edge_index, 
-                                        edge_attr=sample_edge_attr, 
-                                        diode_nodes_tensor=sample_diode_nodes_tensor,
+                                        edge_attr=sample_edge_attr,
                                         y=sample_y)
-                    
-                    guesses = [ML_guess_delta_x, linear_guess_delta_x, linear_guess_delta_x_altered, gradient_guess_delta_x, sample_x_record[rows]]
+
+                    guesses = [ML_guess_delta_x, linear_guess_delta_x, linear_guess_delta_x_altered, gradient_guess_delta_x, CG_guess_delta_x, torch.zeros(len(rows),1,dtype=torch.double).to(device)]
                     count = 0
                     for method in ["clamp","no_clamp"]:
                         for guess in guesses:

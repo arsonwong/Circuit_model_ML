@@ -6,22 +6,7 @@ import torch
 import random
 import numpy as np
 import re
-from a01_example_circuit_network import get_data_generation_settings
-
-def get_data_folder(is_linear, has_current_source, zeroth_iteration):
-    if is_linear:
-        if has_current_source:
-            folder = "data/linear with current source" 
-        else:
-            folder = "data/linear with no current source"
-    else: 
-        if has_current_source:
-            folder = "data/nonlinear with current source" 
-        else:
-            folder = "data/nonlinear with no current source"
-    if zeroth_iteration:
-        folder += " zeroth iteration"
-    return folder
+from utilities import get_data_generation_settings, get_data_folder
 
 def generate_data(zeroth_iteration = True, is_linear=False, has_current_source=True, acceptable_initial_cond_num=1e3, overwrite=False):
     folder = get_data_folder(is_linear, has_current_source, zeroth_iteration)
@@ -50,7 +35,11 @@ def generate_data(zeroth_iteration = True, is_linear=False, has_current_source=T
         
         outputs = []
         while pbar.n < data_num[iter]:
-            grid_circuit = GridCircuit(rows=4,cols=4,is_linear=is_linear,has_current_source=has_current_source) # makes a random grid circuit each time
+            rows = random.randint(4,16)
+            cols = random.randint(4,16)
+            node_density = 0.8 + 0.15*random.random()
+            edge_density = 0.8 + 0.15*random.random()
+            grid_circuit = GridCircuit(rows=rows,cols=cols,node_density=node_density,edge_density=edge_density,is_linear=is_linear,has_current_source=has_current_source) # makes a random grid circuit each time
             find_ = np.where(grid_circuit.edge_type==1)[0] # looks for current source
             actually_has_current_source = len(find_)>0
             # encourages more circuits with current source

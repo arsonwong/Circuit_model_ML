@@ -49,7 +49,7 @@ class GridCircuit():
         possible_edges = torch.tensor(possible_edges,dtype=torch.long)
         max_ = possible_edges.shape[0]
         if num_edges is None:
-            num_edges = int(max_ * 0.8)
+            num_edges = int(max_ * self.edge_density)
         rand_perm = torch.randperm(max_)
         self.edges = possible_edges[rand_perm[:num_edges],:]
         # if any node became totally disconnected, then connect back to a neighbour
@@ -111,16 +111,17 @@ class GridCircuit():
             list_ = list(component)
             if not np.any(~np.isnan(self.bc[list_])):
                 self.bc[list_[0]] = 0
+                self.bc[list_[-1]] = np.random.rand()*10 - 5
     def export(self):
-        COO_tensor = torch.zeros(2*self.edges.shape[1],7,dtype=torch.double)
-        node_boundary_conditions = torch.zeros(self.num_nodes,3,dtype=torch.double)
+        COO_tensor = torch.zeros(2*self.edges.shape[1],6,dtype=torch.double)
+        node_boundary_conditions = torch.zeros(self.num_nodes,2,dtype=torch.double)
         for i, edge in enumerate(self.edges.T):
             # edge[0] to edge[1]
             COO_tensor[i,0:2] = edge.clone().detach()
             # IL, cond, log_I0, diode polarity 
             # diode polarity --> if edge is i,j, and diode points from i to j, then diode polarity is 1
             # otherwise it is -1
-            edge_feature = torch.zeros(1,5,dtype=torch.double)
+            edge_feature = torch.zeros(1,4,dtype=torch.double)
             # diode neg node, diode pos node
             if self.edge_type[i]==0:
                 edge_feature[0,1] = 1/self.edge_value[i]
@@ -153,10 +154,10 @@ class GridCircuit():
         edge_feature = COO_tensor[:,2:]
 
         data = pyg.data.Data(
-            x=starting_guess,  
-            edge_index=edge_index,  
-            edge_attr=edge_feature, 
-            y=node_boundary_conditions,
+            x=starting_guess,  #  nodes x 1
+            edge_index=edge_index,  # edges x 2
+            edge_attr=edge_feature, # edges x 4
+            y=node_boundary_conditions, # nodes x 2
         )
         
         return data
@@ -344,8 +345,8 @@ class CircuitNetwork(pyg.nn.MessagePassing):
         if y is not None:
             indices = torch.where(y[:,0]==1) # pinned voltage boundary condition
             node_error[indices] = 0.0 # just assume the voltage pinned nodes are set at the desired voltage, we don't measure voltage errors
-            indices = torch.where(y[:,0]==2) # pinned current boundary condition
-            node_error[indices] = net_I[indices] - y[indices[0],2].unsqueeze(1) 
+            # indices = torch.where(y[:,0]==2) # pinned current boundary condition
+            # node_error[indices] = net_I[indices] - y[indices[0],2].unsqueeze(1) 
         return node_error
 
 if __name__ == "__main__":

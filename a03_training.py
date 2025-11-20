@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader  # for batching graphs
-from torch_geometric.data import Batch
+from torch.utils.data import DataLoader
+from torch_geometric.loader import DataLoader
 from tqdm import tqdm  # for progress bar
 import pickle
 import torch_geometric as pyg
@@ -12,39 +12,8 @@ import os
 import re
 from datetime import datetime
 import json
-from a02_generate_training_data import get_data_folder
-from a01_example_circuit_network import get_data_generation_settings
-
-def custom_collate_fn(data_list):
-    # Standard PyG batching (handles x, edge_index, edge_attr, y, etc.)
-    batch = Batch.from_data_list(data_list)
-
-    # Manually batch diode_nodes_tensor by adding node offset per graph
-    diode_nodes = []
-    edge_indices = []
-    sample_indices = []
-    node_offset = 0
-
-    for i, data in enumerate(data_list):
-        a = data.diode_nodes_tensor.clone()
-        find_ = torch.where(a[:,0]>=0)[0]
-        a[find_,:] += node_offset
-        diode_nodes.append(a)
-
-        a = data.edge_index.clone()
-        a += node_offset
-        edge_indices.append(a)
-
-        sample_index = i*torch.ones(data.num_nodes,1,dtype=torch.long,device=data.diode_nodes_tensor.device)
-        sample_indices.append(sample_index)
-        node_offset += data.num_nodes
-
-    batch.diode_nodes_tensor = torch.cat(diode_nodes, dim=0)
-    batch.edge_index = torch.cat(edge_indices,dim=1)
-    batch.sample_indices = torch.cat(sample_indices,dim=0)
-
-    return batch
-
+from utilities import get_data_generation_settings, get_data_folder
+    
 class Dataset(pyg.data.Dataset):
     def __init__(self, data_path, split, size=None):
         super().__init__()
@@ -55,6 +24,7 @@ class Dataset(pyg.data.Dataset):
             size = max_size
         self.size = size
         self.data_set = []
+        counter = 0
         for i in tqdm(range(size), desc=f"Loading {split} dataset"):
             file_path = f"{self.data_path}/{self.split}/sample_{i}.pkl"
             if not os.path.exists(file_path):
@@ -69,7 +39,9 @@ class Dataset(pyg.data.Dataset):
                         setattr(data, aux_info, instance[aux_info].clone())
                 data.x = data.x_record.clone()
                 data.answer = answer.clone()
+                data.sample_index = counter*torch.ones(data.num_nodes,1,dtype=torch.long,device=data.answer.device)
                 self.data_set.append(data)
+                counter += 1
 
     def len(self):
         return self.size
@@ -78,7 +50,7 @@ class Dataset(pyg.data.Dataset):
         return self.data_set[idx]
 
 def prep_train_or_ver(zeroth_iteration = True, is_linear=False, has_current_source=True, 
-                 hidden_size=128, n_mp_layers=10, layernorm=True, loss_fn=0, starting_point=None, learning_rate = 1e-4):
+                 hidden_size=128, n_mp_layers=10, layernorm=True, num_mesh_levels=2, loss_fn=0, starting_point=None, learning_rate = 1e-4):
     if starting_point is None:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         weight_path = "weights/" + timestamp
@@ -90,7 +62,8 @@ def prep_train_or_ver(zeroth_iteration = True, is_linear=False, has_current_sour
         "hidden_size": hidden_size, 
         "n_mp_layers": n_mp_layers,
         "layernorm": layernorm, 
-        "loss_fn": loss_fn
+        "loss_fn": loss_fn,
+        "num_mesh_levels": num_mesh_levels
         }
         json_path = os.path.join(weight_path, "parameters.json")
         with open(json_path, "w") as f:
@@ -101,7 +74,10 @@ def prep_train_or_ver(zeroth_iteration = True, is_linear=False, has_current_sour
     folder = get_data_folder(is_linear, has_current_source, zeroth_iteration)
 
     # ==== Model, loss, optimizer ====
-    model = LearnedSimulator(hidden_size=hidden_size,n_mp_layers=n_mp_layers).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    model_type = "bsms"
+    if num_mesh_levels==0:
+        model_type = "gnn"
+    model = LearnedSimulator(hidden_size=hidden_size,n_mp_layers=n_mp_layers,num_mesh_levels=num_mesh_levels,model_type=model_type).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     if starting_point is not None:
         model.load_state_dict(torch.load(starting_point["start_weight_filename"]))
@@ -113,8 +89,8 @@ def train(model, optimizer, folder, weight_path, loss_fn, epochs = 100, batch_si
     train_dataset = Dataset(folder,"train")
     val_dataset = Dataset(folder,"val")
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
     device = next(model.parameters()).device
     cn = CircuitNetwork(max_log_diode_I = 5).to(device)
@@ -165,12 +141,12 @@ def train(model, optimizer, folder, weight_path, loss_fn, epochs = 100, batch_si
                 answer = batch.answer - batch.x_record # final answer - initial guess
 
                 indices = torch.where(batch.y[:,0]!=1) # not pinned voltage boundary condition
-                sample_indices_ = batch.sample_indices[indices]
+                sample_indices_ = batch.sample_index[indices]
                 output_ = output[indices]
                 answer_ = answer[indices]
                 node_error_ = node_error[indices]
 
-                for j in range(torch.max(sample_indices_)):
+                for j in torch.unique(sample_indices_):
                     find_ = torch.where(sample_indices_==j)
                     sample_output_ = output_[find_]
                     sample_answer_ = answer_[find_]
@@ -268,42 +244,44 @@ if __name__ == "__main__":
                     print(f"--- {folder_name} ---")
                     # print(json.dumps(params, indent=4))
 
-    for hidden_size in [64,128,256]:
-        for n_mp_layers in [5,10,20]:
-            for layernorm in [True, False]: 
-                for loss_fn in [0,1,2,3]:
-                    json_ = {
-                    "zeroth_iteration": zeroth_iteration, 
-                    "is_linear": is_linear, 
-                    "has_current_source": has_current_source, 
-                    "hidden_size": hidden_size, 
-                    "n_mp_layers": n_mp_layers,
-                    "layernorm": layernorm, 
-                    "loss_fn": loss_fn
-                    }
-                    started = False
-                    completed = False
-                    start_weight_path = []
-                    start_weight_filename = []
-                    start_epoch = -1
-                    for j, param in enumerate(params):
-                        if param == json_:
-                            started = True
-                            val_loss_history = val_losses[j]
-                            start_weight_path = weight_paths[j]
-                            start_epoch = len(val_loss_history)
-                            start_weight_filename = os.path.join(start_weight_path,f"weight_{start_epoch}.pt")
-                            if val_loss_history.size > 12:
-                                part_min_ = np.min(val_loss_history[:-10])
-                                all_min_ = np.min(val_loss_history)
-                                if all_min_ > part_min_*0.99:
-                                    completed = True
-                                    break
-                    if completed:
-                        continue
-                    starting_point = None
-                    if started:
-                        starting_point = {"start_weight_path": start_weight_path, "start_weight_filename": start_weight_filename, "start_epoch": start_epoch}
-                    train(*prep_train_or_ver(zeroth_iteration=zeroth_iteration, hidden_size=hidden_size, n_mp_layers=n_mp_layers, 
-                                            layernorm=layernorm, loss_fn=loss_fn, starting_point=starting_point,
-                                            is_linear=is_linear,has_current_source=has_current_source))
+    for hidden_size in [64]: #,128,256]:
+        for n_mp_layers in [5]: #,10,20]:
+            for layernorm in [True]: #[True, False]: 
+                for loss_fn in [2]:
+                    for num_mesh_levels in [2]:
+                        json_ = {
+                        "zeroth_iteration": zeroth_iteration, 
+                        "is_linear": is_linear, 
+                        "has_current_source": has_current_source, 
+                        "hidden_size": hidden_size, 
+                        "n_mp_layers": n_mp_layers,
+                        "layernorm": layernorm, 
+                        "loss_fn": loss_fn,
+                        "num_mesh_levels": num_mesh_levels
+                        }
+                        started = False
+                        completed = False
+                        start_weight_path = []
+                        start_weight_filename = []
+                        start_epoch = -1
+                        for j, param in enumerate(params):
+                            if param == json_:
+                                started = True
+                                val_loss_history = val_losses[j]
+                                start_weight_path = weight_paths[j]
+                                start_epoch = len(val_loss_history)
+                                start_weight_filename = os.path.join(start_weight_path,f"weight_{start_epoch}.pt")
+                                if val_loss_history.size > 12:
+                                    part_min_ = np.min(val_loss_history[:-10])
+                                    all_min_ = np.min(val_loss_history)
+                                    if all_min_ > part_min_*0.99:
+                                        completed = True
+                                        break
+                        if completed:
+                            continue
+                        starting_point = None
+                        if started:
+                            starting_point = {"start_weight_path": start_weight_path, "start_weight_filename": start_weight_filename, "start_epoch": start_epoch}
+                        train(*prep_train_or_ver(zeroth_iteration=zeroth_iteration, hidden_size=hidden_size, n_mp_layers=n_mp_layers, 
+                                                layernorm=layernorm, num_mesh_levels=num_mesh_levels, loss_fn=loss_fn, starting_point=starting_point,
+                                                is_linear=is_linear,has_current_source=has_current_source))

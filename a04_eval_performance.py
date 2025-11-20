@@ -6,8 +6,10 @@ import torch_geometric as pyg
 from Circuit_Model_ML.circuit_network_ML import *
 from Circuit_Model_ML.circuit_network import *
 import os
-from a03_training import *
-from a02_generate_training_data import get_data_folder
+import datetime
+from utilities import get_data_generation_settings, get_data_folder
+import json
+from a03_training import Dataset
 
 if __name__ == "__main__":
     zeroth_iteration, is_linear, has_current_source, _ = get_data_generation_settings()
@@ -60,7 +62,7 @@ if __name__ == "__main__":
     for param in params:
         folder = get_data_folder(param["is_linear"], param["has_current_source"], param["zeroth_iteration"])
         val_dataset = Dataset(folder,"val2",size=1000)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=custom_collate_fn)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size)
         hidden_size = param["hidden_size"]
         n_mp_layers = param["n_mp_layers"]
         model = LearnedSimulator(hidden_size=hidden_size,n_mp_layers=n_mp_layers).to(device := torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
@@ -70,8 +72,6 @@ if __name__ == "__main__":
         torch.set_grad_enabled(False)
         direction_loss = torch.tensor([0,0,0],dtype=torch.float).to(device)
         abs_loss = torch.tensor([0,0,0,0,0],dtype=torch.float).to(device)
-        solver_num_iterations = torch.tensor([0,0,0,0,0,0],dtype=torch.float).to(device)
-        solver_num_success = torch.tensor([0,0,0,0,0,0],dtype=torch.float).to(device)
         sample_count = 0
         node_count = 0
         for batch in val_loader:
@@ -83,18 +83,16 @@ if __name__ == "__main__":
             x_record = batch.x_record
             delta_x_record = batch.delta_x_record
             delta_x_altered_record = batch.delta_x_altered_record
+            sample_indices = batch.sample_index
 
-            for j in range(torch.max(batch.sample_indices)):
-                find_ = torch.where(batch.sample_indices==j)[0]
+            for j in torch.unique(sample_indices):
+                find_ = torch.where(sample_indices==j)[0]
                 min_index = min(find_)
                 max_index = max(find_)
                 sample_x_record = batch.x_record[find_,:]
                 find2_ = torch.where((batch.edge_index[0,:]>=min_index) & (batch.edge_index[0,:]<=max_index))[0]
                 sample_edge_index = batch.edge_index[:,find2_]-min_index
                 sample_edge_attr = batch.edge_attr[find2_,:]
-                sample_diode_nodes_tensor = batch.diode_nodes_tensor[find2_,:]
-                find3_ = torch.where(sample_diode_nodes_tensor[:,0]>=0)[0]
-                sample_diode_nodes_tensor[find3_,:] -= min_index
                 sample_y = batch.y[find_,:]
                 sample_output = output[find_,:]
                 sample_answer = answer[find_,:]
@@ -105,8 +103,7 @@ if __name__ == "__main__":
 
                 J = torch.autograd.functional.jacobian(lambda x_: cn(pyg.data.Data(x=x_, 
                                                                         edge_index=sample_edge_index, 
-                                                                        edge_attr=sample_edge_attr, 
-                                                                        diode_nodes_tensor=sample_diode_nodes_tensor,
+                                                                        edge_attr=sample_edge_attr,
                                                                         y=sample_y)), sample_x_record).squeeze()
                 
                 rows = torch.where(sample_y[:,0]!=1)[0] # not pinned voltage boundary condition
@@ -121,8 +118,6 @@ if __name__ == "__main__":
 
                 RMS = torch.sqrt(torch.sum(sample_node_error_)).item()
                 if torch.norm(sample_answer_) > 0 and RMS < 1e-4:
-                    solver_num_iterations[5] += num_iterations
-                    solver_num_success[5] += 1
                     if torch.norm(sample_delta_x_record_) ==0 or torch.isinf(sample_delta_x_record_).any():
                         sample_delta_x_record_ = torch.ones_like(sample_output_).to(device)
                     if torch.norm(sample_initial_node_error_) ==0:
@@ -176,7 +171,6 @@ if __name__ == "__main__":
 
         RMS_loss = torch.sqrt(abs_loss/node_count)
         direction_loss = direction_loss/node_count
-        avg_solver_num_iterations = solver_num_iterations/solver_num_success
         losses = {
             "RMS_loss_ML": RMS_loss[0].item(),
             "RMS_loss_linear_guess": RMS_loss[1].item(),
